@@ -13,7 +13,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rust-toolchain.toml pins 1.95.0 with rustfmt + clippy; rustup on the
       # runner auto-installs it on first cargo invocation. This step forces
