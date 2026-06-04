@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id AS \"id!: i64\",\n               condition_id,\n               fired_at,\n               severity,\n               title,\n               message\n        FROM notification_log\n        ORDER BY fired_at DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "condition_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "fired_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "severity",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "message",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4402f3e55ec6f195f0e7085949ee9b4eef1a461e3e23224c404ed0f7316ba460"
+}

@@ -1,0 +1,52 @@
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+# Add advisory IDs here with an inline reason when a specific advisory
+# needs to be acknowledged-and-tolerated. Example:
+#   { id = "RUSTSEC-XXXX-XXXX", reason = "..." }
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # CDLA-Permissive-2.0 covers the Mozilla root CA bundle distributed by
+    # webpki-roots, which rustls pulls in transitively via sqlx. The license
+    # is permissive and acceptable; the data (CA list) is not source code.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+# When a real dep brings in a duplicate version, prefer fixing the dep graph
+# (override the transitive, bump a constraint). Use `skip = [...]` here only
+# when the duplicate is truly unavoidable, with an inline reason per entry.
+skip = [
+    # hashbrown 0.15 (via sqlx-core's hashlink) vs 0.17 (via sqlx-core's indexmap).
+    # Both arrive through different sqlx-core internals; nothing we can override.
+    { crate = "hashbrown@0.15.5", reason = "transitive via sqlx-core (hashlink); unify when sqlx upgrades" },
+    # windows-sys 0.52 (via ring) vs 0.61 (via rustls/newer deps). Build-time only
+    # on Windows; harmless on macOS/Linux but flagged on principle.
+    { crate = "windows-sys@0.52.0", reason = "transitive via ring; sqlx pulls a newer windows-sys for rustls" },
+    # webpki-roots 0.26 (via sqlx-core) vs 1.0 (via reqwest/hyper-rustls).
+    # Both carry the same Mozilla CA bundle; unify when sqlx upgrades to webpki-roots 1.x.
+    { crate = "webpki-roots@0.26.11", reason = "transitive via sqlx-core; reqwest uses webpki-roots 1.x" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

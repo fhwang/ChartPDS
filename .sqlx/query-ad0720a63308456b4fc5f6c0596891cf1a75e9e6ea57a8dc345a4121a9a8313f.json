@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT source_name AS \"source_name!: String\",\n               credentials_json,\n               revision AS \"revision!: i64\",\n               updated_at\n        FROM source_credentials\n        WHERE source_name = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "credentials_json",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "revision!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ad0720a63308456b4fc5f6c0596891cf1a75e9e6ea57a8dc345a4121a9a8313f"
+}

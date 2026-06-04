@@ -1,0 +1,5 @@
+[env]
+# Force sqlx's query!/query_as! macros to read from the .sqlx/ cache instead
+# of connecting to a live database during cargo build. Regenerate the cache
+# with `just prepare-sql` after any migration or query change.
+SQLX_OFFLINE = "true"

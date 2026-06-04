@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id AS \"id!: i64\", archive_key, kind, source, original_filename, ingested_at AS \"ingested_at: OffsetDateTime\"\n        FROM source_documents\n        WHERE archive_key = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "archive_key",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "original_filename",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "ingested_at: OffsetDateTime",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "e1a9bd7348349a741b1115130773d55a6c3424f302af6d0511b013c2b6aec256"
+}

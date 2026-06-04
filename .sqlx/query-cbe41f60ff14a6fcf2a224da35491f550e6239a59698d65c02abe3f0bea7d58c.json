@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO notification_state (condition_id, last_fired_at, last_state)\n        VALUES (?, ?, ?)\n        ON CONFLICT(condition_id) DO UPDATE SET\n            last_fired_at = excluded.last_fired_at,\n            last_state = excluded.last_state\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "cbe41f60ff14a6fcf2a224da35491f550e6239a59698d65c02abe3f0bea7d58c"
+}

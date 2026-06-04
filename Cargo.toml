@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chartpds-core",
+    "crates/chartpds-mcp",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fhwang/ChartPDS"
+authors = ["Francis Hwang"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+allow_attributes_without_reason = "deny"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
+object_store = "0.11"
+bytes = "1.7"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2.0"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "sqlite",
+    "macros",
+    "migrate",
+    "time",
+] }
+time = { version = "0.3", features = ["macros", "parsing", "serde"] }
+roxmltree = "0.20"
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
+schemars = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"

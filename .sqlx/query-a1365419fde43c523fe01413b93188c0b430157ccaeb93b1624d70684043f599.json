@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO notification_log (condition_id, fired_at, severity, title, message)\n        VALUES (?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a1365419fde43c523fe01413b93188c0b430157ccaeb93b1624d70684043f599"
+}

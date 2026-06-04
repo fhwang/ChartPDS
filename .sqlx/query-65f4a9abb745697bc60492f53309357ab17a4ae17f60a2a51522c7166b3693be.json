@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO source_documents (archive_key, kind, source, original_filename, ingested_at)\n        VALUES (?, ?, ?, ?, ?)\n        RETURNING id AS \"id!: i64\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "65f4a9abb745697bc60492f53309357ab17a4ae17f60a2a51522c7166b3693be"
+}

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT source_name AS \"source_name!: String\",\n               date AS \"date!: String\",\n               samples_count AS \"samples_count!: i64\",\n               samples_count_prev,\n               last_pulled_at\n        FROM source_day_state\n        WHERE source_name = ? AND date = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "date!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "samples_count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "samples_count_prev",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_pulled_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "cb0ae91204089370e581231d2cff0ffe9f725af38a53abb00064f75e3575832e"
+}

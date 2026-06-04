@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO source_credentials (source_name, credentials_json, revision, updated_at)\n        VALUES (?, ?, 1, ?)\n        ON CONFLICT(source_name) DO UPDATE SET\n            credentials_json = excluded.credentials_json,\n            revision = source_credentials.revision + 1,\n            updated_at = excluded.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7807d66c25af6e07461c3a5b212d9269683d5bfa80fed080efee8c8b62cb5942"
+}

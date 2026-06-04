@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id AS \"id!: i64\", source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               status, onset_date\n        FROM problems\n        WHERE source_document_id = ?\n        ORDER BY onset_date\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "source_document_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "coding_system",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_code",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_display",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "onset_date",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "d081dcdef7f7542fbef84d39d0bff578025ffefb18338dfa0ed70fcca5a3628c"
+}

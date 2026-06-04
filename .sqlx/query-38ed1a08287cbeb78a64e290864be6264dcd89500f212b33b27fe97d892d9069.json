@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id AS \"id!: i64\", source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               effective_start AS \"effective_start: OffsetDateTime\",\n               effective_end AS \"effective_end?: OffsetDateTime\",\n               value_quantity, value_string, value_unit\n        FROM observations\n        WHERE source_document_id = ?\n        ORDER BY effective_start\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "source_document_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "coding_system",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_code",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_display",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_start: OffsetDateTime",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_end?: OffsetDateTime",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "value_quantity",
+        "ordinal": 7,
+        "type_info": "Float"
+      },
+      {
+        "name": "value_string",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "value_unit",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "38ed1a08287cbeb78a64e290864be6264dcd89500f212b33b27fe97d892d9069"
+}

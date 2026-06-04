@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT source_name AS \"source_name!: String\",\n               last_sync_at,\n               last_sync_status,\n               last_error_message,\n               last_error_reason,\n               last_synced_window_end,\n               freshness_frontier_at,\n               successful_ticks_since_frontier_advance AS \"successful_ticks_since_frontier_advance!: i64\",\n               consecutive_sync_failures AS \"consecutive_sync_failures!: i64\"\n        FROM source_state\n        WHERE source_name = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_sync_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_sync_status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_error_message",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_error_reason",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_synced_window_end",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "freshness_frontier_at",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "successful_ticks_since_frontier_advance!: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "consecutive_sync_failures!: i64",
+        "ordinal": 8,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "c1f0ec13dae73e800166d1595cfb88db857818e9526ce0b28ac1af0a1177d011"
+}

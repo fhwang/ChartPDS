@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO source_day_state (source_name, date, samples_count, samples_count_prev, last_pulled_at)\n        VALUES (?, ?, ?, ?, ?)\n        ON CONFLICT(source_name, date) DO UPDATE SET\n            samples_count = excluded.samples_count,\n            samples_count_prev = excluded.samples_count_prev,\n            last_pulled_at = excluded.last_pulled_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c8712540e5cd9a57e26dbfad46cdc0b25203a61277ab3f56d2ed1e4339f80a51"
+}

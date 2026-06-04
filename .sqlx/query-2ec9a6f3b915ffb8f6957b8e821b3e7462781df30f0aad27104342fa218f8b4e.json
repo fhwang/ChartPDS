@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT condition_id AS \"condition_id!: String\",\n               last_fired_at,\n               last_state AS \"last_state!: String\"\n        FROM notification_state\n        WHERE condition_id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "condition_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_fired_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_state!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2ec9a6f3b915ffb8f6957b8e821b3e7462781df30f0aad27104342fa218f8b4e"
+}

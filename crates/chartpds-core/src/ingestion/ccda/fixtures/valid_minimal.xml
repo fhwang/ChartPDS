@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <templateId root="2.16.840.1.113883.10.20.22.1.1" extension="2015-08-01"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.2" extension="2015-08-01"/>
+  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1" displayName="Summary of episode note"/>
+  <title>Test Patient Summary</title>
+  <effectiveTime value="20260101120000+0000"/>
+  <component>
+    <structuredBody>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.4.1" extension="2015-08-01"/>
+          <code code="8716-3" codeSystem="2.16.840.1.113883.6.1" displayName="Vital signs"/>
+          <title>Vital Signs</title>
+          <entry>
+            <organizer classCode="CLUSTER" moodCode="EVN">
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260101120000+0000"/>
+                  <value xsi:type="PQ" value="72.5" unit="kg"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="8302-2" codeSystem="2.16.840.1.113883.6.1" displayName="Body height"/>
+                  <effectiveTime value="20260101120000+0000"/>
+                  <value xsi:type="PQ" value="175" unit="cm"/>
+                </observation>
+              </component>
+            </organizer>
+          </entry>
+        </section>
+      </component>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.5.1" extension="2015-08-01"/>
+          <code code="11450-4" codeSystem="2.16.840.1.113883.6.1" displayName="Problem list"/>
+          <title>Problems</title>
+          <entry>
+            <act classCode="ACT" moodCode="EVN">
+              <entryRelationship typeCode="SUBJ">
+                <observation classCode="OBS" moodCode="EVN">
+                  <statusCode code="completed"/>
+                  <effectiveTime><low value="20200315"/></effectiveTime>
+                  <value xsi:type="CD" code="44054006" codeSystem="2.16.840.1.113883.6.96"
+                         displayName="Type 2 diabetes mellitus"/>
+                </observation>
+              </entryRelationship>
+            </act>
+          </entry>
+        </section>
+      </component>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.1.1" extension="2014-06-09"/>
+          <code code="10160-0" codeSystem="2.16.840.1.113883.6.1" displayName="History of Medication use"/>
+          <title>Medications</title>
+          <entry>
+            <substanceAdministration classCode="SBADM" moodCode="EVN">
+              <statusCode code="active"/>
+              <effectiveTime xsi:type="IVL_TS"><low value="20210601"/></effectiveTime>
+              <doseQuantity value="500" unit="mg"/>
+              <consumable>
+                <manufacturedProduct>
+                  <manufacturedMaterial>
+                    <code code="860975" codeSystem="2.16.840.1.113883.6.88"
+                          displayName="Metformin 500 MG Oral Tablet"/>
+                  </manufacturedMaterial>
+                </manufacturedProduct>
+              </consumable>
+            </substanceAdministration>
+          </entry>
+        </section>
+      </component>
+    </structuredBody>
+  </component>
+</ClinicalDocument>

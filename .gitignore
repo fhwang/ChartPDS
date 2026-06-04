@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local (machine-specific permissions/settings)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# SQLite work files (local dev databases — production data lives elsewhere)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
