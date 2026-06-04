@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins 1.95.0 with rustfmt + clippy; rustup on the
+      # runner auto-installs it on first cargo invocation. This step forces
+      # that install up front so failures are clearly attributed.
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Prebuilt binaries for just + the three cargo subcommands that
+      # `just check` gates on (cargo-deny, cargo-machete, sqlx-cli).
+      - name: Install just and cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny,cargo-machete,sqlx-cli
+
+      - name: Run full check pipeline
+        run: just check
