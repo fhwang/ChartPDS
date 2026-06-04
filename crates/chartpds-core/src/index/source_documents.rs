@@ -18,8 +18,10 @@ pub struct SourceDocument {
     pub source: String,
     /// Original filename at ingestion time, if known.
     pub original_filename: Option<String>,
-    /// Wall-clock time the document was ingested.
-    pub ingested_at: OffsetDateTime,
+    /// Wall-clock time the blob's bytes first entered the archive. Immutable;
+    /// preserved across index rebuilds (sourced from the blob's sidecar
+    /// manifest), not stamped at projection time.
+    pub archived_at: OffsetDateTime,
 }
 
 /// Parameters for [`insert`].
@@ -32,8 +34,8 @@ pub struct InsertParams<'a> {
     pub source: &'a str,
     /// Original filename if known.
     pub original_filename: Option<&'a str>,
-    /// Wall-clock ingestion time.
-    pub ingested_at: OffsetDateTime,
+    /// Wall-clock time the blob entered the archive (archive-entry time).
+    pub archived_at: OffsetDateTime,
 }
 
 /// Insert a new `source_documents` row.
@@ -48,7 +50,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
     let archive_key = params.archive_key.as_str();
     let row = sqlx::query!(
         r#"
-        INSERT INTO source_documents (archive_key, kind, source, original_filename, ingested_at)
+        INSERT INTO source_documents (archive_key, kind, source, original_filename, archived_at)
         VALUES (?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
@@ -56,7 +58,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         params.kind,
         params.source,
         params.original_filename,
-        params.ingested_at,
+        params.archived_at,
     )
     .fetch_one(pool)
     .await?;
@@ -84,7 +86,7 @@ pub async fn fetch_by_archive_key(
     let key_str = archive_key.as_str();
     let row = sqlx::query!(
         r#"
-        SELECT id AS "id!: i64", archive_key, kind, source, original_filename, ingested_at AS "ingested_at: OffsetDateTime"
+        SELECT id AS "id!: i64", archive_key, kind, source, original_filename, archived_at AS "archived_at: OffsetDateTime"
         FROM source_documents
         WHERE archive_key = ?
         "#,
@@ -100,7 +102,7 @@ pub async fn fetch_by_archive_key(
         kind: r.kind,
         source: r.source,
         original_filename: r.original_filename,
-        ingested_at: r.ingested_at,
+        archived_at: r.archived_at,
     }))
 }
 
@@ -127,7 +129,7 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         )
         .expect("valid key");
-        let ingested_at = OffsetDateTime::now_utc();
+        let archived_at = OffsetDateTime::now_utc();
 
         let id = insert(
             &pool,
@@ -136,7 +138,7 @@ mod tests {
                 kind: "ccda",
                 source: "manual-upload",
                 original_filename: Some("ccd.xml"),
-                ingested_at,
+                archived_at,
             },
         )
         .await
@@ -174,7 +176,7 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         )
         .expect("valid key");
-        let ingested_at = OffsetDateTime::now_utc();
+        let archived_at = OffsetDateTime::now_utc();
 
         insert(
             &pool,
@@ -183,7 +185,7 @@ mod tests {
                 kind: "ccda",
                 source: "src",
                 original_filename: None,
-                ingested_at,
+                archived_at,
             },
         )
         .await
@@ -196,7 +198,7 @@ mod tests {
                 kind: "ccda",
                 source: "src",
                 original_filename: None,
-                ingested_at,
+                archived_at,
             },
         )
         .await;

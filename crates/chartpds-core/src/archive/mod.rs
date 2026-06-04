@@ -6,8 +6,10 @@
 
 mod error;
 mod key;
+mod manifest;
 mod store;
 
 pub use error::{Error, Result};
 pub use key::{compute_blob_key, BlobKey, KeyParseError};
+pub use manifest::Manifest;
 pub use store::Archive;

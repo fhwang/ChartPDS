@@ -37,7 +37,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
     "time",
 ] }
-time = { version = "0.3", features = ["macros", "parsing", "serde"] }
+time = { version = "0.3", features = ["macros", "parsing", "serde", "serde-well-known", "formatting"] }
 roxmltree = "0.20"
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 schemars = "1.2"

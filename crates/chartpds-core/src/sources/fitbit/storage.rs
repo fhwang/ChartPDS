@@ -5,20 +5,24 @@
 
 use bytes::Bytes;
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
-use super::api::IntradayResult;
+use super::api::{self, IntradayResult};
 use super::parser;
-use crate::archive::Archive;
+use crate::archive::{Archive, BlobKey, Manifest};
 use crate::index;
 use crate::sources;
 
+/// `CloudEvents` `type` for an archived Fitbit intraday heart-rate day.
+const KIND: &str = "fitbit-intraday-hr-day";
+/// `CloudEvents` `source` for the Fitbit adapter.
+const SOURCE: &str = "fitbit";
+
 /// Ingest one day's heart-rate data into the archive + index.
 ///
-/// 1. Serialize the raw JSON pages to bytes and archive them.
-/// 2. Insert a `source_documents` row linking the archive key.
-/// 3. Parse the samples into observations (interval synthesis).
-/// 4. Insert each observation row.
-/// 5. Update `source_day_state` with the new sample count.
+/// 1. Serialize the raw JSON pages and archive them with a provenance manifest
+///    (the day is recorded as the manifest `subject` so the blob is replayable).
+/// 2. Insert a `source_documents` row, observations, and `source_day_state`.
 ///
 /// Returns the `source_documents.id`.
 pub(crate) async fn ingest_day(
@@ -27,30 +31,113 @@ pub(crate) async fn ingest_day(
     date: &str,
     result: &IntradayResult,
 ) -> sources::Result<i64> {
-    // 1. Archive raw JSON.
+    // 1. Archive raw JSON pages with a sidecar manifest.
     let raw_bytes = serde_json::to_vec(&result.raw_pages).map_err(|err| sources::Error::Parse {
         reason: format!("serializing raw pages: {err}"),
     })?;
-    let content = Bytes::from(raw_bytes);
-    let archive_key = archive.put(content).await?;
+    let archived_at = OffsetDateTime::now_utc();
+    let original_filename = format!("fitbit-hr-{date}.json");
+    let manifest = Manifest::new(
+        SOURCE,
+        KIND,
+        "application/json",
+        Some(date.to_owned()),
+        archived_at,
+        Some(original_filename.clone()),
+    );
+    let archive_key = archive
+        .put_with_manifest(Bytes::from(raw_bytes), manifest)
+        .await?;
 
-    // 2. Insert source_documents row.
+    // 2. Project into the index.
+    index_intraday_day(
+        pool,
+        &archive_key,
+        date,
+        result,
+        archived_at,
+        &original_filename,
+    )
+    .await
+}
+
+/// Rebuild the index rows for an already-archived Fitbit blob.
+///
+/// Reads the raw JSON pages from `content`, re-derives the samples (via the
+/// same page parser used at fetch time), and re-projects into the index — no
+/// network call. The day is taken from the manifest `subject`.
+///
+/// # Errors
+///
+/// Returns [`sources::Error::Parse`] if the bytes are not the expected
+/// `Vec<page>` JSON, if a page fails to parse, or if the manifest lacks the
+/// `subject` (date) needed to key `source_day_state`.
+pub(crate) async fn replay(
+    pool: &SqlitePool,
+    archive_key: &BlobKey,
+    content: &[u8],
+    manifest: &Manifest,
+) -> sources::Result<i64> {
+    let date = manifest
+        .subject
+        .as_deref()
+        .ok_or_else(|| sources::Error::Parse {
+            reason: "fitbit manifest missing subject (date) for replay".to_owned(),
+        })?;
+
+    let raw_pages: Vec<serde_json::Value> =
+        serde_json::from_slice(content).map_err(|err| sources::Error::Parse {
+            reason: format!("deserializing fitbit raw pages: {err}"),
+        })?;
+
+    let mut samples = Vec::new();
+    for page in &raw_pages {
+        let (page_samples, _next) = api::parse_data_points_page(page)?;
+        samples.extend(page_samples);
+    }
+    let result = IntradayResult { samples, raw_pages };
+
+    let original_filename = manifest
+        .original_filename
+        .clone()
+        .unwrap_or_else(|| format!("fitbit-hr-{date}.json"));
+
+    index_intraday_day(
+        pool,
+        archive_key,
+        date,
+        &result,
+        manifest.archived_at,
+        &original_filename,
+    )
+    .await
+}
+
+/// Shared index-write tail: insert the `source_documents` row, the synthesized
+/// heart-rate observations, and the `source_day_state`. Used by both live sync
+/// ([`ingest_day`]) and archive [`replay`] so the projection logic cannot drift.
+async fn index_intraday_day(
+    pool: &SqlitePool,
+    archive_key: &BlobKey,
+    date: &str,
+    result: &IntradayResult,
+    archived_at: OffsetDateTime,
+    original_filename: &str,
+) -> sources::Result<i64> {
     let source_document_id = index::insert_source_document(
         pool,
         index::InsertSourceDocumentParams {
-            archive_key: &archive_key,
-            kind: "fitbit-intraday-hr-day",
-            source: "fitbit",
-            original_filename: Some(&format!("fitbit-hr-{date}.json")),
-            ingested_at: time::OffsetDateTime::now_utc(),
+            archive_key,
+            kind: KIND,
+            source: SOURCE,
+            original_filename: Some(original_filename),
+            archived_at,
         },
     )
     .await?;
 
-    // 3. Parse samples.
     let observations = parser::parse_intraday_day(result)?;
 
-    // 4. Insert observations.
     for obs in &observations {
         index::insert_observation(
             pool,
@@ -69,19 +156,19 @@ pub(crate) async fn ingest_day(
         .await?;
     }
 
-    // 5. Update source_day_state, carrying prior count for stability tracking.
-    let prior = index::get_source_day_state(pool, "fitbit", date)
+    // Update source_day_state, carrying prior count for stability tracking.
+    let prior = index::get_source_day_state(pool, SOURCE, date)
         .await
         .ok()
         .flatten();
     let prev_count = prior.map(|s| s.samples_count);
-    let now_str = time::OffsetDateTime::now_utc()
+    let now_str = OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     index::upsert_source_day_state(
         pool,
         index::UpsertSourceDayStateParams {
-            source_name: "fitbit",
+            source_name: SOURCE,
             date,
             #[allow(
                 clippy::cast_possible_wrap,
