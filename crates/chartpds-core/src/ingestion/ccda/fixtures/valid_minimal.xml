@@ -73,6 +73,35 @@
           </entry>
         </section>
       </component>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.3.1" extension="2015-08-01"/>
+          <code code="30954-2" codeSystem="2.16.840.1.113883.6.1" displayName="Results"/>
+          <title>Results</title>
+          <entry>
+            <organizer classCode="BATTERY" moodCode="EVN">
+              <code nullFlavor="UNK"/>
+              <statusCode code="completed"/>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="4548-4" codeSystem="2.16.840.1.113883.6.1" displayName="HEMOGLOBIN A1c"/>
+                  <statusCode code="completed"/>
+                  <effectiveTime value="20250806040200"/>
+                  <value xsi:type="PQ" value="5.5" unit="%"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="13457-7" codeSystem="2.16.840.1.113883.6.1" displayName="LDL Cholesterol"/>
+                  <statusCode code="completed"/>
+                  <effectiveTime value="20250806040200"/>
+                  <value xsi:type="PQ" value="99" unit="mg/dL"/>
+                </observation>
+              </component>
+            </organizer>
+          </entry>
+        </section>
+      </component>
     </structuredBody>
   </component>
 </ClinicalDocument>
