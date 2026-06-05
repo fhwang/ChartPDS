@@ -24,6 +24,17 @@ pub enum Error {
     /// Database operation failed.
     #[error("database operation failed")]
     Database(#[source] sqlx::Error),
+
+    /// An adapter (Fitbit/Oura) failed to replay an archived blob during a
+    /// rebuild.
+    #[error("adapter replay failed")]
+    Adapter(#[source] crate::sources::Error),
+}
+
+impl From<crate::sources::Error> for Error {
+    fn from(err: crate::sources::Error) -> Self {
+        Self::Adapter(err)
+    }
 }
 
 impl From<roxmltree::Error> for Error {

@@ -6,21 +6,26 @@
 
 use bytes::Bytes;
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
 use super::api::OuraSleepSession;
 use super::parser::{self, ParsedSleepObservation};
-use crate::archive::Archive;
+use crate::archive::{Archive, BlobKey, Manifest};
 use crate::clinical::{AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM};
 use crate::index;
 use crate::sources;
 
+/// `CloudEvents` `type` for an archived Oura sleep session.
+const KIND: &str = "oura-sleep-session";
+/// `CloudEvents` `source` for the Oura adapter.
+const SOURCE: &str = "oura";
+
 /// Ingest one Oura sleep session into the archive + index.
 ///
-/// 1. Serialize the raw JSON to bytes and archive it.
-/// 2. Insert a `source_documents` row linking the archive key.
-/// 3. Parse the sleep-phase string into per-epoch observations.
-/// 4. Insert each observation row with AASM sleep-stage coding.
-/// 5. Update `source_day_state` with the observation count.
+/// 1. Serialize the raw JSON and archive it with a provenance manifest (the
+///    sleep day is recorded as the manifest `subject`). The archived bytes are
+///    the full API session object, so the blob is self-contained for replay.
+/// 2. Insert a `source_documents` row, observations, and `source_day_state`.
 ///
 /// Returns the `source_documents.id`.
 pub(crate) async fn ingest_session(
@@ -29,37 +34,93 @@ pub(crate) async fn ingest_session(
     session: &OuraSleepSession,
     raw_json: &serde_json::Value,
 ) -> sources::Result<i64> {
-    // 1. Archive raw JSON.
+    // 1. Archive raw JSON with a sidecar manifest.
     let raw_bytes = serde_json::to_vec(raw_json).map_err(|err| sources::Error::Parse {
         reason: format!("serializing oura raw JSON: {err}"),
     })?;
-    let content = Bytes::from(raw_bytes);
-    let archive_key = archive.put(content).await?;
+    let archived_at = OffsetDateTime::now_utc();
+    let original_filename = format!("oura-sleep-{}-{}.json", session.day, session.id);
+    let manifest = Manifest::new(
+        SOURCE,
+        KIND,
+        "application/json",
+        Some(session.day.clone()),
+        archived_at,
+        Some(original_filename.clone()),
+    );
+    let archive_key = archive
+        .put_with_manifest(Bytes::from(raw_bytes), manifest)
+        .await?;
 
-    // 2. Insert source_documents row.
+    // 2. Project into the index.
+    index_sleep_session(pool, &archive_key, session, archived_at, &original_filename).await
+}
+
+/// Rebuild the index rows for an already-archived Oura blob.
+///
+/// The archived bytes are the full API session object, so the session is simply
+/// deserialized back out and re-projected — no network call.
+///
+/// # Errors
+///
+/// Returns [`sources::Error::Parse`] if the bytes do not deserialize into an
+/// [`OuraSleepSession`].
+pub(crate) async fn replay(
+    pool: &SqlitePool,
+    archive_key: &BlobKey,
+    content: &[u8],
+    manifest: &Manifest,
+) -> sources::Result<i64> {
+    let session: OuraSleepSession =
+        serde_json::from_slice(content).map_err(|err| sources::Error::Parse {
+            reason: format!("deserializing oura session: {err}"),
+        })?;
+
+    let original_filename = manifest
+        .original_filename
+        .clone()
+        .unwrap_or_else(|| format!("oura-sleep-{}-{}.json", session.day, session.id));
+
+    index_sleep_session(
+        pool,
+        archive_key,
+        &session,
+        manifest.archived_at,
+        &original_filename,
+    )
+    .await
+}
+
+/// Shared index-write tail: insert the `source_documents` row, the per-epoch
+/// sleep-stage observations, and the `source_day_state`. Used by both live sync
+/// ([`ingest_session`]) and archive [`replay`] so projection logic cannot drift.
+async fn index_sleep_session(
+    pool: &SqlitePool,
+    archive_key: &BlobKey,
+    session: &OuraSleepSession,
+    archived_at: OffsetDateTime,
+    original_filename: &str,
+) -> sources::Result<i64> {
     let source_document_id = index::insert_source_document(
         pool,
         index::InsertSourceDocumentParams {
-            archive_key: &archive_key,
-            kind: "oura-sleep-session",
-            source: "oura",
-            original_filename: Some(&format!("oura-sleep-{}-{}.json", session.day, session.id)),
-            ingested_at: time::OffsetDateTime::now_utc(),
+            archive_key,
+            kind: KIND,
+            source: SOURCE,
+            original_filename: Some(original_filename),
+            archived_at,
         },
     )
     .await?;
 
-    // 3. Parse sleep epochs.
     let observations =
         parser::parse_sleep_epochs(&session.bedtime_start, &session.sleep_phase_5_min)?;
 
-    // 4. Insert observations.
     for obs in &observations {
         insert_sleep_observation(pool, source_document_id, obs).await?;
     }
 
-    // 5. Update source_day_state.
-    let now_str = time::OffsetDateTime::now_utc()
+    let now_str = OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     #[allow(
@@ -70,7 +131,7 @@ pub(crate) async fn ingest_session(
     index::upsert_source_day_state(
         pool,
         index::UpsertSourceDayStateParams {
-            source_name: "oura",
+            source_name: SOURCE,
             date: &session.day,
             samples_count: count,
             samples_count_prev: None,

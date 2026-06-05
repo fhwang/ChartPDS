@@ -16,6 +16,10 @@ pub enum Error {
     /// The storage backend returned an error not specific to a blob.
     #[error("storage backend error")]
     Backend(#[source] object_store::Error),
+
+    /// A blob's sidecar manifest could not be serialized or parsed as JSON.
+    #[error("manifest serialization error")]
+    Manifest(#[source] serde_json::Error),
 }
 
 impl From<object_store::Error> for Error {

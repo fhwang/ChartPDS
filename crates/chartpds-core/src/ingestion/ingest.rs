@@ -4,7 +4,7 @@ use bytes::Bytes;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use crate::archive::Archive;
+use crate::archive::{Archive, Manifest};
 use crate::index::{
     insert_medication, insert_observation, insert_problem, insert_source_document,
     InsertMedicationParams, InsertObservationParams, InsertProblemParams,
@@ -20,7 +20,8 @@ use crate::ingestion::{Error, Result};
 /// Ingest a CCDA document.
 ///
 /// Steps:
-/// 1. Write the blob to the archive (content-addressed; idempotent).
+/// 1. Write the blob + its provenance manifest to the archive
+///    (content-addressed; idempotent).
 /// 2. Parse the XML and run the CCDA self-check.
 /// 3. Extract observations (vital signs + lab results), problems, and
 ///    medications.
@@ -55,10 +56,18 @@ pub async fn ingest(
     kind: &str,
     source: &str,
     original_filename: Option<&str>,
-    ingested_at: OffsetDateTime,
+    archived_at: OffsetDateTime,
 ) -> Result<i64> {
-    // 1. Archive the blob.
-    let archive_key = archive.put(content.clone()).await?;
+    // 1. Archive the blob with its provenance manifest (CloudEvents-shaped).
+    let manifest = Manifest::new(
+        source,
+        kind,
+        "application/xml",
+        None,
+        archived_at,
+        original_filename.map(str::to_owned),
+    );
+    let archive_key = archive.put_with_manifest(content.clone(), manifest).await?;
 
     // 2. Parse + self-check. `roxmltree` needs a `&str`.
     let xml = std::str::from_utf8(&content).map_err(|err| Error::NotCcda {
@@ -82,7 +91,7 @@ pub async fn ingest(
             kind,
             source,
             original_filename,
-            ingested_at,
+            archived_at,
         },
     )
     .await?;

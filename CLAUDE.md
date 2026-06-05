@@ -102,9 +102,34 @@ makes rebuilds cheap, so schema mistakes are recoverable by re-ingest.
    confirms it's actually used.
 3. Prefer crates with permissive licenses (see `deny.toml` allow-list).
 
+## Archive
+
+The archive (`archive/`) is a content-addressed blob store: every blob's
+path is the SHA-256 hex of its bytes, so equal content dedupes automatically.
+All source types share one flat `$DIR/archive/` directory; the bytes stay the
+raw, untouched payload (CCDA XML, Fitbit/Oura JSON).
+
+Each blob is paired with a **sidecar manifest** `<hash>.meta.json` that makes
+the archive self-describing — the SQLite index can be fully reconstructed from
+the archive alone. The manifest follows the
+[CloudEvents v1.0](https://github.com/cloudevents/spec) context-attribute model
+in *binary content mode* (`archive/manifest.rs`): `type` (== `source_documents.kind`),
+`source`, `datacontenttype`, `subject` (the per-document replay date — Fitbit
+day / Oura sleep day — so no adapter needs a custom blob envelope), `time`
+(== `archived_at`, immutable), and `originalfilename`.
+
+Write blobs with `Archive::put_with_manifest(content, manifest)`; it writes the
+blob then the sidecar and stamps the manifest `id` with the content hash. Bare
+`Archive::put` (no manifest) still exists for tests. `list_keys` filters to
+64-char hex, so `.meta.json` sidecars are never mistaken for blobs.
+
+`archived_at` is the immutable time the bytes first entered the archive. It is
+carried in the manifest and copied *through* on rebuild — it is **not** the
+projection-build time and must never be re-stamped to "now".
+
 ## Ingestion
 
-`ingestion::ingest()` is the canonical write path: archive blob ->
+`ingestion::ingest()` is the canonical write path: archive blob + manifest ->
 parse CCDA -> extract observations + problems + medications -> write
 `source_documents` row and one row per extracted item. It does NOT use
 a transaction; if the process crashes mid-ingest, re-run from the
@@ -235,10 +260,17 @@ dispatches any that fire (see Notifications below).
 
 To regenerate the index after a parser fix or schema change, call
 `rebuild_index`. It clears `source_documents` (cascading to
-observations, problems, and medications) and re-ingests every
-archived blob as CCDA, skipping non-CCDA blobs. Adapter data
-(Fitbit heart-rate samples, Oura sleep stages) is not replayed;
-run `sync_source` after to re-pull.
+observations, problems, and medications) and replays every archived
+blob, routed by its sidecar manifest `type`: CCDA documents are
+re-ingested, Fitbit/Oura blobs are replayed by their adapters
+(`sources::{fitbit,oura}::storage::replay`). All sources are
+reconstructed from the archive alone — no `sync_source` re-pull is
+needed. Each blob's `archived_at` is preserved from its manifest.
+
+Blobs with no manifest (legacy, pre-manifest) fall back to a
+best-effort CCDA parse. Unknown manifest types and malformed payloads
+are counted as skipped. `RebuildResult` reports per-source counts:
+`{blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, blobs_skipped}`.
 
 ## Notifications
 

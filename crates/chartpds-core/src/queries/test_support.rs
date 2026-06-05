@@ -53,7 +53,7 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
             kind: "ccda",
             source: "test",
             original_filename: None,
-            ingested_at: OffsetDateTime::now_utc(),
+            archived_at: OffsetDateTime::now_utc(),
         },
     )
     .await

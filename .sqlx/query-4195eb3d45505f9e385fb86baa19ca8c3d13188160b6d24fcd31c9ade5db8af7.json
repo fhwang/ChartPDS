@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id AS \"id!: i64\", archive_key, kind, source, original_filename, ingested_at AS \"ingested_at: OffsetDateTime\"\n        FROM source_documents\n        WHERE archive_key = ?\n        ",
+  "query": "\n        SELECT id AS \"id!: i64\", archive_key, kind, source, original_filename, archived_at AS \"archived_at: OffsetDateTime\"\n        FROM source_documents\n        WHERE archive_key = ?\n        ",
   "describe": {
     "columns": [
       {
@@ -29,7 +29,7 @@
         "type_info": "Text"
       },
       {
-        "name": "ingested_at: OffsetDateTime",
+        "name": "archived_at: OffsetDateTime",
         "ordinal": 5,
         "type_info": "Text"
       }
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "e1a9bd7348349a741b1115130773d55a6c3424f302af6d0511b013c2b6aec256"
+  "hash": "4195eb3d45505f9e385fb86baa19ca8c3d13188160b6d24fcd31c9ade5db8af7"
 }

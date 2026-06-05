@@ -6,7 +6,7 @@ use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 
-use crate::archive::{compute_blob_key, BlobKey, Result};
+use crate::archive::{compute_blob_key, BlobKey, Manifest, Result};
 
 /// Content-addressed blob archive backed by an [`ObjectStore`].
 ///
@@ -48,6 +48,67 @@ impl Archive {
         let path = Path::from(key.as_str());
         self.backend.put(&path, content.into()).await?;
         Ok(key)
+    }
+
+    /// Path of the sidecar manifest for a blob: `<hash>.meta.json`.
+    ///
+    /// This deliberately does not parse as a [`BlobKey`] (it is not 64 hex
+    /// chars), so [`Archive::list_keys`] skips it and never mistakes a sidecar
+    /// for a blob.
+    fn manifest_path(key: &BlobKey) -> Path {
+        Path::from(format!("{}.meta.json", key.as_str()))
+    }
+
+    /// Write a blob plus its provenance [`Manifest`] sidecar.
+    ///
+    /// The blob is written first, then the sidecar, mirroring the
+    /// "blob is durable truth" model: a blob that ends up without a sidecar
+    /// still degrades gracefully (rebuild falls back to type-sniffing). The
+    /// manifest's `id` is set to the content hash before writing.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::archive::Error::Backend`] if either object-store write fails.
+    /// - [`crate::archive::Error::Manifest`] if the manifest cannot be
+    ///   serialized to JSON.
+    pub async fn put_with_manifest(&self, content: Bytes, manifest: Manifest) -> Result<BlobKey> {
+        let key = self.put(content).await?;
+
+        let mut manifest = manifest;
+        manifest.id = key.as_str().to_owned();
+        let json = serde_json::to_vec(&manifest).map_err(crate::archive::Error::Manifest)?;
+
+        self.backend
+            .put(&Self::manifest_path(&key), Bytes::from(json).into())
+            .await?;
+        Ok(key)
+    }
+
+    /// Read a blob's sidecar [`Manifest`], if one exists.
+    ///
+    /// Returns `Ok(None)` for a blob archived without a manifest (e.g. via the
+    /// bare [`Archive::put`]); callers treat that as "legacy / type unknown."
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::archive::Error::Backend`] for storage failures other than
+    ///   "not found."
+    /// - [`crate::archive::Error::Manifest`] if a present sidecar is not valid
+    ///   manifest JSON.
+    pub async fn get_manifest(&self, key: &BlobKey) -> Result<Option<Manifest>> {
+        match self.backend.get(&Self::manifest_path(key)).await {
+            Ok(result) => {
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(crate::archive::Error::Backend)?;
+                let manifest =
+                    serde_json::from_slice(&bytes).map_err(crate::archive::Error::Manifest)?;
+                Ok(Some(manifest))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(err) => Err(crate::archive::Error::Backend(err)),
+        }
     }
 
     /// Read a blob from the archive by its key.
@@ -255,5 +316,74 @@ mod tests {
 
         let got = archive.get(&key1).await.expect("get succeeds");
         assert_eq!(got, content);
+    }
+
+    fn sample_manifest() -> crate::archive::Manifest {
+        crate::archive::Manifest::new(
+            "oura",
+            "oura-sleep-session",
+            "application/json",
+            Some("2026-01-15".to_owned()),
+            time::macros::datetime!(2026-01-15 03:12:00 UTC),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn put_with_manifest_round_trips_blob_and_manifest() {
+        let backend = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let archive = Archive::new(backend);
+
+        let content = Bytes::from_static(b"{\"day\":\"2026-01-15\"}");
+        let key = archive
+            .put_with_manifest(content.clone(), sample_manifest())
+            .await
+            .expect("put_with_manifest");
+
+        // Blob bytes are untouched.
+        assert_eq!(archive.get(&key).await.expect("get"), content);
+
+        // Manifest round-trips, with id assigned to the content hash.
+        let manifest = archive
+            .get_manifest(&key)
+            .await
+            .expect("get_manifest")
+            .expect("manifest present");
+        assert_eq!(manifest.id, key.as_str());
+        assert_eq!(manifest.kind, "oura-sleep-session");
+        assert_eq!(manifest.subject.as_deref(), Some("2026-01-15"));
+    }
+
+    #[tokio::test]
+    async fn get_manifest_returns_none_for_bare_put() {
+        let backend = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let archive = Archive::new(backend);
+
+        let key = archive
+            .put(Bytes::from_static(b"no manifest here"))
+            .await
+            .expect("put");
+
+        assert!(archive
+            .get_manifest(&key)
+            .await
+            .expect("get_manifest")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn list_keys_excludes_manifest_sidecars() {
+        let backend = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let archive = Archive::new(backend);
+
+        let key = archive
+            .put_with_manifest(Bytes::from_static(b"payload"), sample_manifest())
+            .await
+            .expect("put_with_manifest");
+
+        // Exactly one blob key, despite the `.meta.json` sidecar also living
+        // in the backend.
+        let keys = archive.list_keys().await.expect("list_keys");
+        assert_eq!(keys, vec![key]);
     }
 }

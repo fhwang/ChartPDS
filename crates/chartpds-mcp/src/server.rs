@@ -322,7 +322,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Drop and rebuild the entire index from archived blobs. Re-ingests every CCDA document; skips non-CCDA blobs (e.g. adapter JSON). Run sync_source after to restore adapter data. Returns {blobs_found, documents_ingested, blobs_skipped}."
+        description = "Drop and rebuild the entire index from archived blobs, replaying every source (CCDA, Fitbit, Oura) via each blob's sidecar manifest. No re-sync needed. Unknown or malformed blobs are skipped. Returns {blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, blobs_skipped}."
     )]
     async fn rebuild_index(
         &self,
@@ -558,7 +558,7 @@ mod tests {
                 kind: "ccda",
                 source: "test",
                 original_filename: None,
-                ingested_at: OffsetDateTime::now_utc(),
+                archived_at: OffsetDateTime::now_utc(),
             },
         )
         .await
@@ -864,7 +864,7 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         assert_eq!(value["blobs_found"], 1);
-        assert_eq!(value["documents_ingested"], 1);
+        assert_eq!(value["ccda_ingested"], 1);
         assert_eq!(value["blobs_skipped"], 0);
 
         // Observations should still be present after the rebuild.
