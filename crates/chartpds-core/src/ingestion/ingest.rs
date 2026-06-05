@@ -12,7 +12,9 @@ use crate::index::{
 };
 use crate::ingestion::ccda::parse::parse_xml;
 use crate::ingestion::ccda::self_check::self_check;
-use crate::ingestion::ccda::{extract_medications, extract_observations, extract_problems};
+use crate::ingestion::ccda::{
+    extract_medications, extract_observations, extract_problems, extract_results,
+};
 use crate::ingestion::{Error, Result};
 
 /// Ingest a CCDA document.
@@ -20,7 +22,8 @@ use crate::ingestion::{Error, Result};
 /// Steps:
 /// 1. Write the blob to the archive (content-addressed; idempotent).
 /// 2. Parse the XML and run the CCDA self-check.
-/// 3. Extract observations, problems, and medications.
+/// 3. Extract observations (vital signs + lab results), problems, and
+///    medications.
 /// 4. Insert a `source_documents` row.
 /// 5. Insert observations, problems, and medications rows.
 ///
@@ -64,8 +67,10 @@ pub async fn ingest(
     let doc = parse_xml(xml)?;
     self_check(&doc)?;
 
-    // 3. Extract observations, problems, and medications.
-    let extracted = extract_observations(&doc)?;
+    // 3. Extract observations, problems, and medications. Vital signs and lab
+    // results are both observations and share the observations table.
+    let mut extracted = extract_observations(&doc)?;
+    extracted.extend(extract_results(&doc)?);
     let problems = extract_problems(&doc)?;
     let medications = extract_medications(&doc)?;
 
@@ -184,7 +189,10 @@ mod tests {
         let observations = list_observations_by_source_document(&pool, id)
             .await
             .expect("list");
-        assert_eq!(observations.len(), 2);
+        // 2 vital signs (weight, height) + 2 lab results (HbA1c, LDL-C).
+        assert_eq!(observations.len(), 4);
+        assert!(observations.iter().any(|o| o.coding_code == "4548-4"));
+        assert!(observations.iter().any(|o| o.coding_code == "13457-7"));
 
         let problems = list_problems_by_source_document(&pool, id)
             .await

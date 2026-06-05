@@ -111,10 +111,23 @@ a transaction; if the process crashes mid-ingest, re-run from the
 archive (the bytes are durable). Transactional ingestion lands when
 `sources/` or `sync/` need atomic multi-table writes.
 
-Three CCDA sections are extracted today: vital signs (observations),
-problems (diagnoses), and medications (prescriptions). Other sections
-(results, allergies, procedures) get their own follow-up phases when
-needed.
+Four CCDA sections are extracted today: vital signs and lab results
+(both stored as observations), problems (diagnoses), and medications
+(prescriptions). Other sections (allergies, procedures) get their own
+follow-up phases when needed.
+
+Vital signs (LOINC 8716-3) and lab results (LOINC 30954-2) both land in
+the `observations` table — a lab draw (HbA1c, LDL-C, glucose, …) is just
+an observation with a lab LOINC code. The results extractor
+(`ccda/results.rs`) handles two real-world wrinkles the vitals path never
+hit: lab `effectiveTime` values often omit the timezone offset (the
+14-char `YYYYMMDDHHmmss` form, treated as UTC by `ccda/time.rs`), and lab
+`<value>` elements use a wider set of `xsi:type`s (`PQ`, `ST`, `CD`,
+`IVL_PQ`). It is deliberately permissive: an unrecognized value type or a
+`nullFlavor` quantity records a valueless draw (code + time) rather than
+failing the whole document. Note Epic encodes calculated LDL-C as a
+`nullFlavor` `PQ` whose number lives in a nested `<translation value=…>`;
+`extract_pq_value` recovers it, so do not "simplify" that fallback away.
 
 ## Queries
 
