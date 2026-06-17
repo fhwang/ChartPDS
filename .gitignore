@@ -8,8 +8,11 @@
 *.swp
 *.swo
 
-# Claude Code local (machine-specific permissions/settings)
-.claude/settings.local.json
+# Claude Code local (machine-specific settings and worktrees)
+.claude/
+
+# Local toolchain manager config (personal; rust-toolchain.toml is the source of truth)
+mise.toml
 
 # OS
 .DS_Store
