@@ -74,6 +74,32 @@ pub(crate) struct ListNotificationsArgs {
     pub(crate) limit: Option<i64>,
 }
 
+/// A coding selector: FHIR system URI plus code.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct Coding {
+    /// FHIR system URI (e.g. `"http://loinc.org"` or the AASM sleep-stage URI).
+    pub(crate) system: String,
+    /// Code within the system (e.g. `"8867-4"`).
+    pub(crate) code: String,
+}
+
+/// Arguments for the `observation_duration_in_range` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct ObservationDurationInRangeArgs {
+    /// Coding to aggregate over.
+    pub(crate) coding: Coding,
+    /// Inclusive start of the time window (RFC 3339).
+    pub(crate) start: String,
+    /// Exclusive end of the time window (RFC 3339).
+    pub(crate) end: String,
+    /// Inclusive lower bound on `value_quantity`.
+    pub(crate) value_min: f64,
+    /// Inclusive upper bound on `value_quantity`.
+    pub(crate) value_max: f64,
+    /// Bucketing: `"none"` (default, single total) or `"day"` (per UTC day).
+    pub(crate) bucket: Option<String>,
+}
+
 /// `ChartPDS` MCP server.
 ///
 /// Holds the shared `SqlitePool`, the blob [`Archive`], and an `rmcp`
@@ -405,6 +431,48 @@ impl ChartPdsServer {
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
         let json = serde_json::to_string(&entries)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Total minutes a coded periodic signal spent inside a value range over a window. Args: coding {system, code}, start/end (RFC 3339, half-open), value_min/value_max (inclusive). bucket \"none\" (default) returns {total_minutes}; \"day\" returns {per_bucket:[{bucket_start, total_minutes}]} grouped by UTC day."
+    )]
+    async fn observation_duration_in_range(
+        &self,
+        Parameters(args): Parameters<ObservationDurationInRangeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let start = time::OffsetDateTime::parse(&args.start, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
+        let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
+        let bucket = match args.bucket.as_deref() {
+            None | Some("none") => chartpds_core::queries::Bucket::None,
+            Some("day") => chartpds_core::queries::Bucket::Day,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!("invalid bucket {other:?}; expected \"none\" or \"day\""),
+                    None,
+                ))
+            }
+        };
+
+        let result = chartpds_core::queries::duration_in_value_range(
+            &self.pool,
+            chartpds_core::queries::DurationInValueRangeParams {
+                coding_system: &args.coding.system,
+                coding_code: &args.coding.code,
+                start,
+                end,
+                value_min: args.value_min,
+                value_max: args.value_max,
+                bucket,
+            },
+        )
+        .await
+        .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+
+        let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -880,6 +948,83 @@ mod tests {
         let obs_value: serde_json::Value = serde_json::from_str(obs_text).expect("valid JSON");
         let arr = obs_value.as_array().expect("expected array");
         assert!(!arr.is_empty(), "observations should survive rebuild");
+    }
+
+    async fn fresh_server_with_hr_minutes() -> ChartPdsServer {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+
+        let key = BlobKey::from_hex_str(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect("valid key");
+        let doc_id = insert_source_document(
+            &pool,
+            InsertSourceDocumentParams {
+                archive_key: &key,
+                kind: "ccda",
+                source: "test",
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .expect("doc");
+
+        // Two 1-minute HR intervals: 110 bpm (in 101..118) and 130 bpm (out).
+        for (start_end, bpm) in [
+            ((datetime!(2026-01-01 08:00:00 UTC), datetime!(2026-01-01 08:01:00 UTC)), 110.0),
+            ((datetime!(2026-01-01 08:01:00 UTC), datetime!(2026-01-01 08:02:00 UTC)), 130.0),
+        ] {
+            insert_observation(
+                &pool,
+                InsertObservationParams {
+                    source_document_id: doc_id,
+                    coding_system: "http://loinc.org",
+                    coding_code: "8867-4",
+                    coding_display: Some("Heart rate"),
+                    effective_start: start_end.0,
+                    effective_end: Some(start_end.1),
+                    value_quantity: Some(bpm),
+                    value_string: None,
+                    value_unit: Some("bpm"),
+                },
+            )
+            .await
+            .expect("obs");
+        }
+
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, None, reqwest::Client::new())
+    }
+
+    #[tokio::test]
+    async fn observation_duration_in_range_totals_in_zone_minutes() {
+        let server = fresh_server_with_hr_minutes().await;
+        let result = server
+            .observation_duration_in_range(Parameters(ObservationDurationInRangeArgs {
+                coding: Coding {
+                    system: "http://loinc.org".to_string(),
+                    code: "8867-4".to_string(),
+                },
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-02T00:00:00Z".to_string(),
+                value_min: 101.0,
+                value_max: 118.0,
+                bucket: None,
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(value["total_minutes"], 1.0);
     }
 
     #[tokio::test]
