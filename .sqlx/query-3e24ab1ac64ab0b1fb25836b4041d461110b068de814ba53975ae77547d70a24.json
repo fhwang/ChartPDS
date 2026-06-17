@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT COALESCE(\n                           SUM(\n                               CAST(strftime('%s', effective_end) AS INTEGER)\n                               - CAST(strftime('%s', effective_start) AS INTEGER)\n                           ),\n                           0\n                       ) AS \"total_seconds!: i64\"\n                FROM observations\n                WHERE coding_system = ?\n                  AND coding_code = ?\n                  AND effective_start >= ?\n                  AND effective_start < ?\n                  AND effective_end IS NOT NULL\n                  AND value_quantity >= ?\n                  AND value_quantity <= ?\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "total_seconds!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3e24ab1ac64ab0b1fb25836b4041d461110b068de814ba53975ae77547d70a24"
+}
