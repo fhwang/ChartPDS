@@ -1038,8 +1038,20 @@ mod tests {
 
         // Two 1-minute HR intervals: 110 bpm (in 101..118) and 130 bpm (out).
         for (start_end, bpm) in [
-            ((datetime!(2026-01-01 08:00:00 UTC), datetime!(2026-01-01 08:01:00 UTC)), 110.0),
-            ((datetime!(2026-01-01 08:01:00 UTC), datetime!(2026-01-01 08:02:00 UTC)), 130.0),
+            (
+                (
+                    datetime!(2026-01-01 08:00:00 UTC),
+                    datetime!(2026-01-01 08:01:00 UTC),
+                ),
+                110.0,
+            ),
+            (
+                (
+                    datetime!(2026-01-01 08:01:00 UTC),
+                    datetime!(2026-01-01 08:02:00 UTC),
+                ),
+                130.0,
+            ),
         ] {
             insert_observation(
                 &pool,
@@ -1115,8 +1127,20 @@ mod tests {
 
         // Two contiguous 5-min asleep epochs (N2, N3) => a 10-minute run.
         for (start_end, stage) in [
-            ((datetime!(2026-01-01 22:00:00 UTC), datetime!(2026-01-01 22:05:00 UTC)), 2.0),
-            ((datetime!(2026-01-01 22:05:00 UTC), datetime!(2026-01-01 22:10:00 UTC)), 3.0),
+            (
+                (
+                    datetime!(2026-01-01 22:00:00 UTC),
+                    datetime!(2026-01-01 22:05:00 UTC),
+                ),
+                2.0,
+            ),
+            (
+                (
+                    datetime!(2026-01-01 22:05:00 UTC),
+                    datetime!(2026-01-01 22:10:00 UTC),
+                ),
+                3.0,
+            ),
         ] {
             insert_observation(
                 &pool,
