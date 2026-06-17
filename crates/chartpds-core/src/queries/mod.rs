@@ -9,6 +9,7 @@ mod counts_per_code;
 mod duration_in_value_range;
 mod in_range;
 mod latest_by_code;
+mod longest_continuous_in_value_range;
 mod list_medications;
 mod list_notifications;
 mod list_problems;
@@ -17,6 +18,9 @@ mod test_support;
 
 pub use counts_per_code::{counts_per_code, CodeCount};
 pub use duration_in_value_range::{duration_in_value_range, Bucket, BucketMinutes, DurationInRange};
+pub use longest_continuous_in_value_range::{
+    longest_continuous_in_value_range, BucketLongest, LongestContinuousInRange,
+};
 pub use in_range::in_range;
 pub use latest_by_code::latest_by_code;
 pub use list_medications::list_medications;
