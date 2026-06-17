@@ -16,6 +16,13 @@ pub const SYSTEM_ICD10: &str = "http://hl7.org/fhir/sid/icd-10-cm";
 /// SNOMED CT system URI.
 pub const SYSTEM_SNOMED: &str = "http://snomed.info/sct";
 
+/// LOINC code for total sleep duration (per-night summary observation).
+///
+/// Emitted once per night by the Oura adapter alongside the per-epoch
+/// sleep-stage rows, so clients can read a nightly total without summing
+/// epochs. Stored in minutes (`value_unit = "min"`).
+pub const LOINC_SLEEP_DURATION: &str = "93832-4";
+
 /// Translate a CCDA-style OID into its canonical FHIR system URI.
 ///
 /// Returns `None` for OIDs that are not in the known translation table.
@@ -81,5 +88,10 @@ mod tests {
         assert_eq!(fhir_system_for_oid("0.0.0.0"), None);
         assert_eq!(fhir_system_for_oid(""), None);
         assert_eq!(fhir_system_for_oid("2.16.840.1.113883.6.999"), None);
+    }
+
+    #[test]
+    fn loinc_sleep_duration_is_the_expected_code() {
+        assert_eq!(LOINC_SLEEP_DURATION, "93832-4");
     }
 }

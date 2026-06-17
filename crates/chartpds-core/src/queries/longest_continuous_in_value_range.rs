@@ -54,7 +54,10 @@ fn runs(intervals: &[(OffsetDateTime, OffsetDateTime)], gap_seconds: i64) -> Vec
             }
             _ => {
                 if let (Some(s), Some(e)) = (cur_start, cur_end) {
-                    out.push(Run { start: s, minutes: (e - s).as_seconds_f64() / 60.0 });
+                    out.push(Run {
+                        start: s,
+                        minutes: (e - s).as_seconds_f64() / 60.0,
+                    });
                 }
                 cur_start = Some(start);
                 cur_end = Some(end);
@@ -62,7 +65,10 @@ fn runs(intervals: &[(OffsetDateTime, OffsetDateTime)], gap_seconds: i64) -> Vec
         }
     }
     if let (Some(s), Some(e)) = (cur_start, cur_end) {
-        out.push(Run { start: s, minutes: (e - s).as_seconds_f64() / 60.0 });
+        out.push(Run {
+            start: s,
+            minutes: (e - s).as_seconds_f64() / 60.0,
+        });
     }
     out
 }
@@ -70,7 +76,31 @@ fn runs(intervals: &[(OffsetDateTime, OffsetDateTime)], gap_seconds: i64) -> Vec
 /// UTC calendar day (`YYYY-MM-DD`) of a timestamp.
 fn utc_day(ts: OffsetDateTime) -> String {
     let utc = ts.to_offset(UtcOffset::UTC);
-    format!("{:04}-{:02}-{:02}", utc.year(), u8::from(utc.month()), utc.day())
+    format!(
+        "{:04}-{:02}-{:02}",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day()
+    )
+}
+
+/// Parameters for [`longest_continuous_in_value_range`].
+pub struct LongestContinuousParams<'a> {
+    /// FHIR coding system URI.
+    pub coding_system: &'a str,
+    /// Coding code within `coding_system`.
+    pub coding_code: &'a str,
+    /// Start of the half-open window (inclusive).
+    pub start: OffsetDateTime,
+    /// End of the half-open window (exclusive).
+    pub end: OffsetDateTime,
+    /// Minimum `value_quantity` (inclusive).
+    pub value_min: f64,
+    /// Maximum `value_quantity` (inclusive).
+    pub value_max: f64,
+    /// Maximum gap in seconds between consecutive intervals that still counts
+    /// as continuous.
+    pub gap_seconds: i64,
 }
 
 /// Find the longest continuous in-range run per UTC start day.
@@ -86,14 +116,17 @@ fn utc_day(ts: OffsetDateTime) -> String {
 /// Returns `sqlx::Error` if the query fails.
 pub async fn longest_continuous_in_value_range(
     pool: &SqlitePool,
-    coding_system: &str,
-    coding_code: &str,
-    start: OffsetDateTime,
-    end: OffsetDateTime,
-    value_min: f64,
-    value_max: f64,
-    gap_seconds: i64,
+    params: LongestContinuousParams<'_>,
 ) -> Result<LongestContinuousInRange, sqlx::Error> {
+    let LongestContinuousParams {
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+        gap_seconds,
+    } = params;
     let rows = sqlx::query!(
         r#"
         SELECT effective_start AS "effective_start: OffsetDateTime",
@@ -133,7 +166,10 @@ pub async fn longest_continuous_in_value_range(
     Ok(LongestContinuousInRange {
         per_bucket: by_day
             .into_iter()
-            .map(|(bucket_start, longest_minutes)| BucketLongest { bucket_start, longest_minutes })
+            .map(|(bucket_start, longest_minutes)| BucketLongest {
+                bucket_start,
+                longest_minutes,
+            })
             .collect(),
     })
 }
@@ -156,8 +192,14 @@ mod tests {
     fn runs_contiguous_intervals_form_one_run() {
         // Two back-to-back 5-min intervals, gap 0 => one 10-min run.
         let iv = [
-            (datetime!(2026-01-01 22:00:00 UTC), datetime!(2026-01-01 22:05:00 UTC)),
-            (datetime!(2026-01-01 22:05:00 UTC), datetime!(2026-01-01 22:10:00 UTC)),
+            (
+                datetime!(2026-01-01 22:00:00 UTC),
+                datetime!(2026-01-01 22:05:00 UTC),
+            ),
+            (
+                datetime!(2026-01-01 22:05:00 UTC),
+                datetime!(2026-01-01 22:10:00 UTC),
+            ),
         ];
         let r = runs(&iv, 0);
         assert_eq!(r.len(), 1);
@@ -168,8 +210,14 @@ mod tests {
     fn runs_gap_over_tolerance_splits() {
         // 5-min interval, then a 10-min gap, then a 5-min interval. gap 0 splits.
         let iv = [
-            (datetime!(2026-01-01 22:00:00 UTC), datetime!(2026-01-01 22:05:00 UTC)),
-            (datetime!(2026-01-01 22:15:00 UTC), datetime!(2026-01-01 22:20:00 UTC)),
+            (
+                datetime!(2026-01-01 22:00:00 UTC),
+                datetime!(2026-01-01 22:05:00 UTC),
+            ),
+            (
+                datetime!(2026-01-01 22:15:00 UTC),
+                datetime!(2026-01-01 22:20:00 UTC),
+            ),
         ];
         let r = runs(&iv, 0);
         assert_eq!(r.len(), 2);
@@ -182,8 +230,14 @@ mod tests {
         // Same as above but gap_seconds = 600 bridges the 10-min gap into one
         // run spanning 22:00 -> 22:20 = 20 minutes.
         let iv = [
-            (datetime!(2026-01-01 22:00:00 UTC), datetime!(2026-01-01 22:05:00 UTC)),
-            (datetime!(2026-01-01 22:15:00 UTC), datetime!(2026-01-01 22:20:00 UTC)),
+            (
+                datetime!(2026-01-01 22:00:00 UTC),
+                datetime!(2026-01-01 22:05:00 UTC),
+            ),
+            (
+                datetime!(2026-01-01 22:15:00 UTC),
+                datetime!(2026-01-01 22:20:00 UTC),
+            ),
         ];
         let r = runs(&iv, 600);
         assert_eq!(r.len(), 1);
@@ -222,13 +276,15 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = longest_continuous_in_value_range(
             &pool,
-            AASM_SLEEP_STAGE_SYSTEM,
-            AASM_SLEEP_STAGE_CODE,
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-02 00:00:00 UTC),
-            1.0,
-            4.0,
-            0,
+            LongestContinuousParams {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-02 00:00:00 UTC),
+                value_min: 1.0,
+                value_max: 4.0,
+                gap_seconds: 0,
+            },
         )
         .await
         .expect("query");
@@ -274,13 +330,15 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = longest_continuous_in_value_range(
             &pool,
-            AASM_SLEEP_STAGE_SYSTEM,
-            AASM_SLEEP_STAGE_CODE,
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-02 00:00:00 UTC),
-            1.0,
-            4.0,
-            0,
+            LongestContinuousParams {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-02 00:00:00 UTC),
+                value_min: 1.0,
+                value_max: 4.0,
+                gap_seconds: 0,
+            },
         )
         .await
         .expect("query");

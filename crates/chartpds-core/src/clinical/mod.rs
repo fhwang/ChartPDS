@@ -9,5 +9,8 @@ mod coding;
 mod kind_registry;
 
 pub use aasm::{AasmSleepStage, AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM};
-pub use coding::{fhir_system_for_oid, SYSTEM_ICD10, SYSTEM_LOINC, SYSTEM_RXNORM, SYSTEM_SNOMED};
+pub use coding::{
+    fhir_system_for_oid, LOINC_SLEEP_DURATION, SYSTEM_ICD10, SYSTEM_LOINC, SYSTEM_RXNORM,
+    SYSTEM_SNOMED,
+};
 pub use kind_registry::{Kind, KindParseError};

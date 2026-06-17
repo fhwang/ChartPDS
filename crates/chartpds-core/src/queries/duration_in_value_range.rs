@@ -3,7 +3,7 @@
 //! Sums the durations of interval observations whose `value_quantity` falls
 //! within `[value_min, value_max]`, matched by `{coding_system, coding_code}`
 //! and a half-open `[start, end)` window on `effective_start`. The sum runs in
-//! SQLite so high-volume signals (e.g. heart rate) never ship rows to Rust.
+//! `SQLite` so high-volume signals (e.g. heart rate) never ship rows to Rust.
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -42,6 +42,24 @@ pub enum DurationInRange {
     },
 }
 
+/// Parameters for [`duration_in_value_range`].
+pub struct DurationInValueRangeParams<'a> {
+    /// FHIR coding system URI.
+    pub coding_system: &'a str,
+    /// Coding code within `coding_system`.
+    pub coding_code: &'a str,
+    /// Start of the half-open window (inclusive).
+    pub start: OffsetDateTime,
+    /// End of the half-open window (exclusive).
+    pub end: OffsetDateTime,
+    /// Minimum `value_quantity` (inclusive).
+    pub value_min: f64,
+    /// Maximum `value_quantity` (inclusive).
+    pub value_max: f64,
+    /// How to group the result.
+    pub bucket: Bucket,
+}
+
 /// Sum the minutes a coded signal spent inside `[value_min, value_max]`.
 ///
 /// Matches observations by `coding_system`/`coding_code`, `effective_start`
@@ -55,14 +73,17 @@ pub enum DurationInRange {
 /// Returns `sqlx::Error` if the query fails.
 pub async fn duration_in_value_range(
     pool: &SqlitePool,
-    coding_system: &str,
-    coding_code: &str,
-    start: OffsetDateTime,
-    end: OffsetDateTime,
-    value_min: f64,
-    value_max: f64,
-    bucket: Bucket,
+    params: DurationInValueRangeParams<'_>,
 ) -> Result<DurationInRange, sqlx::Error> {
+    let DurationInValueRangeParams {
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+        bucket,
+    } = params;
     match bucket {
         Bucket::None => {
             let row = sqlx::query!(
@@ -93,9 +114,12 @@ pub async fn duration_in_value_range(
             .fetch_one(pool)
             .await?;
 
-            Ok(DurationInRange::Total {
-                total_minutes: row.total_seconds as f64 / 60.0,
-            })
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "total_seconds for realistic observation windows fits f64 without loss"
+            )]
+            let total_minutes = row.total_seconds as f64 / 60.0;
+            Ok(DurationInRange::Total { total_minutes })
         }
         Bucket::Day => {
             let rows = sqlx::query!(
@@ -129,9 +153,16 @@ pub async fn duration_in_value_range(
             Ok(DurationInRange::Buckets {
                 per_bucket: rows
                     .into_iter()
-                    .map(|r| BucketMinutes {
-                        bucket_start: r.day,
-                        total_minutes: r.total_seconds as f64 / 60.0,
+                    .map(|r| {
+                        #[allow(
+                            clippy::cast_precision_loss,
+                            reason = "total_seconds for realistic observation windows fits f64 without loss"
+                        )]
+                        let total_minutes = r.total_seconds as f64 / 60.0;
+                        BucketMinutes {
+                            bucket_start: r.day,
+                            total_minutes,
+                        }
                     })
                     .collect(),
             })
@@ -179,13 +210,15 @@ mod tests {
         // Range 101..118 includes only the 110 bpm minute => 1.0 minute.
         let result = duration_in_value_range(
             &pool,
-            SYSTEM_LOINC,
-            "8867-4",
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-03 00:00:00 UTC),
-            101.0,
-            118.0,
-            Bucket::None,
+            DurationInValueRangeParams {
+                coding_system: SYSTEM_LOINC,
+                coding_code: "8867-4",
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-03 00:00:00 UTC),
+                value_min: 101.0,
+                value_max: 118.0,
+                bucket: Bucket::None,
+            },
         )
         .await
         .expect("query");
@@ -198,13 +231,15 @@ mod tests {
         // Range 90..140 includes all three; day 1 has two minutes, day 2 one.
         let result = duration_in_value_range(
             &pool,
-            SYSTEM_LOINC,
-            "8867-4",
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-03 00:00:00 UTC),
-            90.0,
-            140.0,
-            Bucket::Day,
+            DurationInValueRangeParams {
+                coding_system: SYSTEM_LOINC,
+                coding_code: "8867-4",
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-03 00:00:00 UTC),
+                value_min: 90.0,
+                value_max: 140.0,
+                bucket: Bucket::Day,
+            },
         )
         .await
         .expect("query");
@@ -212,8 +247,14 @@ mod tests {
             result,
             DurationInRange::Buckets {
                 per_bucket: vec![
-                    BucketMinutes { bucket_start: "2026-01-01".to_string(), total_minutes: 2.0 },
-                    BucketMinutes { bucket_start: "2026-01-02".to_string(), total_minutes: 1.0 },
+                    BucketMinutes {
+                        bucket_start: "2026-01-01".to_string(),
+                        total_minutes: 2.0
+                    },
+                    BucketMinutes {
+                        bucket_start: "2026-01-02".to_string(),
+                        total_minutes: 1.0
+                    },
                 ],
             }
         );
@@ -233,13 +274,15 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = duration_in_value_range(
             &pool,
-            SYSTEM_LOINC,
-            "8867-4",
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-02 00:00:00 UTC),
-            1.0,
-            4.0,
-            Bucket::None,
+            DurationInValueRangeParams {
+                coding_system: SYSTEM_LOINC,
+                coding_code: "8867-4",
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-02 00:00:00 UTC),
+                value_min: 1.0,
+                value_max: 4.0,
+                bucket: Bucket::None,
+            },
         )
         .await
         .expect("query");
@@ -252,13 +295,15 @@ mod tests {
         // Window covers only day 1; day-2 row excluded. Range covers all values.
         let result = duration_in_value_range(
             &pool,
-            SYSTEM_LOINC,
-            "8867-4",
-            datetime!(2026-01-01 00:00:00 UTC),
-            datetime!(2026-01-02 00:00:00 UTC),
-            90.0,
-            140.0,
-            Bucket::None,
+            DurationInValueRangeParams {
+                coding_system: SYSTEM_LOINC,
+                coding_code: "8867-4",
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-02 00:00:00 UTC),
+                value_min: 90.0,
+                value_max: 140.0,
+                bucket: Bucket::None,
+            },
         )
         .await
         .expect("query");
