@@ -1215,13 +1215,15 @@ Inside the `#[tool_router]` impl block (alongside `observations_in_range`), add:
 
         let result = chartpds_core::queries::duration_in_value_range(
             &self.pool,
-            &args.coding.system,
-            &args.coding.code,
-            start,
-            end,
-            args.value_min,
-            args.value_max,
-            bucket,
+            chartpds_core::queries::DurationInValueRangeParams {
+                coding_system: &args.coding.system,
+                coding_code: &args.coding.code,
+                start,
+                end,
+                value_min: args.value_min,
+                value_max: args.value_max,
+                bucket,
+            },
         )
         .await
         .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
@@ -1401,13 +1403,15 @@ Inside the `#[tool_router]` impl block, after `observation_duration_in_range`:
 
         let result = chartpds_core::queries::longest_continuous_in_value_range(
             &self.pool,
-            &args.coding.system,
-            &args.coding.code,
-            start,
-            end,
-            args.value_min,
-            args.value_max,
-            gap_seconds,
+            chartpds_core::queries::LongestContinuousParams {
+                coding_system: &args.coding.system,
+                coding_code: &args.coding.code,
+                start,
+                end,
+                value_min: args.value_min,
+                value_max: args.value_max,
+                gap_seconds,
+            },
         )
         .await
         .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
