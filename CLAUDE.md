@@ -164,7 +164,13 @@ Currently: `latest_by_code`, `in_range`, `counts_per_code`,
 there is no shared state and no struct-style query builder.
 Both `duration_in_value_range` and `longest_continuous_in_value_range`
 select observations by `{coding_system, coding_code}`; day bucketing uses
-the UTC calendar day of the interval or run start.
+the UTC calendar day of the interval or run start. They attribute that day
+differently, and the difference is intentional: `duration_in_value_range`
+buckets each interval independently (a run crossing UTC midnight has its
+minutes split across both days), while `longest_continuous_in_value_range`
+attributes a whole run to the UTC day its first interval started (a
+midnight-crossing block lands wholly in one day). So per-day totals from the
+two tools need not reconcile for a block that straddles midnight.
 
 These are composed into named MCP tools (and later CLI subcommands)
 by the binary crate. Adding a new query: drop a new file under
