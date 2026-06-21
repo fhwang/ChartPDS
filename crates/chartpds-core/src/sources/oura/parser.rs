@@ -7,6 +7,7 @@
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use super::api::OuraSleepSession;
 use super::sleep_stage::{oura_char_to_aasm, EPOCH_SECONDS};
 use crate::clinical::AasmSleepStage;
 use crate::sources;
@@ -73,6 +74,62 @@ pub fn parse_sleep_epochs(
     }
 
     Ok(observations)
+}
+
+/// A derived nightly total-sleep-duration summary for one session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedSleepDuration {
+    /// Session start (observation `effective_start`).
+    pub effective_start: OffsetDateTime,
+    /// Session end (observation `effective_end`).
+    pub effective_end: OffsetDateTime,
+    /// Total minutes asleep.
+    pub minutes: f64,
+}
+
+/// Derive the nightly total-sleep-duration observation for a session.
+///
+/// Returns `Some` only for `long_sleep` sessions that report a
+/// `total_sleep_duration`; naps and null-duration sessions return `None`
+/// (their per-epoch observations still land regardless).
+///
+/// # Errors
+///
+/// Returns [`sources::Error::Parse`] if `bedtime_start` or `bedtime_end` is
+/// not valid RFC 3339.
+pub fn nightly_sleep_duration(
+    session: &OuraSleepSession,
+) -> sources::Result<Option<ParsedSleepDuration>> {
+    if session.session_type != "long_sleep" {
+        return Ok(None);
+    }
+    let Some(total_secs) = session.total_sleep_duration else {
+        return Ok(None);
+    };
+
+    let effective_start =
+        OffsetDateTime::parse(&session.bedtime_start, &Rfc3339).map_err(|err| {
+            sources::Error::Parse {
+                reason: format!("invalid bedtime_start {:?}: {err}", session.bedtime_start),
+            }
+        })?;
+    let effective_end = OffsetDateTime::parse(&session.bedtime_end, &Rfc3339).map_err(|err| {
+        sources::Error::Parse {
+            reason: format!("invalid bedtime_end {:?}: {err}", session.bedtime_end),
+        }
+    })?;
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "sleep seconds for a realistic night fit f64 without precision loss"
+    )]
+    let minutes = total_secs as f64 / 60.0;
+
+    Ok(Some(ParsedSleepDuration {
+        effective_start,
+        effective_end,
+        minutes,
+    }))
 }
 
 #[cfg(test)]
@@ -149,5 +206,42 @@ mod tests {
         // Epoch starts at 22:00 EST = 03:00 UTC next day
         assert_eq!(obs[0].effective_start, datetime!(2026-01-15 03:00:00 UTC));
         assert_eq!(obs[0].effective_end, datetime!(2026-01-15 03:05:00 UTC));
+    }
+
+    fn session(session_type: &str, total: Option<i64>) -> OuraSleepSession {
+        OuraSleepSession {
+            id: "s1".to_owned(),
+            day: "2026-01-15".to_owned(),
+            bedtime_start: "2026-01-14T22:00:00Z".to_owned(),
+            bedtime_end: "2026-01-15T06:00:00Z".to_owned(),
+            session_type: session_type.to_owned(),
+            sleep_phase_5_min: "4421".to_owned(),
+            total_sleep_duration: total,
+            rem_sleep_duration: None,
+            deep_sleep_duration: None,
+            light_sleep_duration: None,
+        }
+    }
+
+    #[test]
+    fn nightly_duration_for_long_sleep_with_total() {
+        let parsed = nightly_sleep_duration(&session("long_sleep", Some(28800)))
+            .expect("parse")
+            .expect("some");
+        assert_eq!(parsed.effective_start, datetime!(2026-01-14 22:00:00 UTC));
+        assert_eq!(parsed.effective_end, datetime!(2026-01-15 06:00:00 UTC));
+        assert!((parsed.minutes - 480.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nightly_duration_none_for_null_total() {
+        let parsed = nightly_sleep_duration(&session("long_sleep", None)).expect("parse");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn nightly_duration_none_for_nap() {
+        let parsed = nightly_sleep_duration(&session("late_nap", Some(3600))).expect("parse");
+        assert!(parsed.is_none());
     }
 }

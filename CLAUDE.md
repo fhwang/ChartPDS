@@ -158,9 +158,19 @@ failing the whole document. Note Epic encodes calculated LDL-C as a
 
 `queries::` holds generic analytical primitives over the index.
 Currently: `latest_by_code`, `in_range`, `counts_per_code`,
-`list_problems`, `list_medications`. Each is a pure async function
+`list_problems`, `list_medications`, `duration_in_value_range`,
+`longest_continuous_in_value_range`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
+Both `duration_in_value_range` and `longest_continuous_in_value_range`
+select observations by `{coding_system, coding_code}`; day bucketing uses
+the UTC calendar day of the interval or run start. They attribute that day
+differently, and the difference is intentional: `duration_in_value_range`
+buckets each interval independently (a run crossing UTC midnight has its
+minutes split across both days), while `longest_continuous_in_value_range`
+attributes a whole run to the UTC day its first interval started (a
+midnight-crossing block lands wholly in one day). So per-day totals from the
+two tools need not reconcile for a block that straddles midnight.
 
 These are composed into named MCP tools (and later CLI subcommands)
 by the binary crate. Adding a new query: drop a new file under
@@ -173,12 +183,14 @@ cache the new SQL.
 `chartpds-mcp` is the stdio MCP server binary. It reads
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
 e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`
-and the local-FS archive at `$DIR/archive/`, and serves 10 tools:
+and the local-FS archive at `$DIR/archive/`, and serves 12 tools:
 
 - `ingest_record` — ingest a CCDA document (write path)
 - `latest_observation_by_code` — most-recent observation by LOINC code
 - `observations_in_range` — observations in a time window
 - `observation_counts` — count observations per code
+- `observation_duration_in_range` — total minutes a coded signal spent in a value range
+- `observation_longest_period_in_range` — longest continuous in-range run per day
 - `list_problems` — all problems (diagnoses)
 - `list_medications` — all medications
 - `connect_source` — connect a data source (fitbit OAuth or oura PAT)

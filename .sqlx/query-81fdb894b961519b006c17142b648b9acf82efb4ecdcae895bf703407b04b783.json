@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT date(effective_start) AS \"day!: String\",\n                       SUM(\n                           CAST(strftime('%s', effective_end) AS INTEGER)\n                           - CAST(strftime('%s', effective_start) AS INTEGER)\n                       ) AS \"total_seconds!: i64\"\n                FROM observations\n                WHERE coding_system = ?\n                  AND coding_code = ?\n                  AND effective_start >= ?\n                  AND effective_start < ?\n                  AND effective_end IS NOT NULL\n                  AND value_quantity >= ?\n                  AND value_quantity <= ?\n                GROUP BY date(effective_start)\n                ORDER BY date(effective_start)\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: String",
+        "ordinal": 0,
+        "type_info": "Null"
+      },
+      {
+        "name": "total_seconds!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "81fdb894b961519b006c17142b648b9acf82efb4ecdcae895bf703407b04b783"
+}

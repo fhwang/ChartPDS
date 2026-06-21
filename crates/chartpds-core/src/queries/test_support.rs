@@ -80,3 +80,69 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
 
     (pool, source_document_id)
 }
+
+/// Spec for one interval observation with explicit system and end time.
+///
+/// Unlike [`ObsSpec`], this carries an `effective_end` (so duration-based
+/// queries have an interval to measure) and an explicit `coding_system` (so
+/// tests can mix LOINC and AASM rows).
+#[derive(Clone)]
+pub(crate) struct IntervalObsSpec {
+    pub(crate) coding_system: &'static str,
+    pub(crate) coding_code: &'static str,
+    pub(crate) effective_start: OffsetDateTime,
+    pub(crate) effective_end: OffsetDateTime,
+    pub(crate) value_quantity: f64,
+}
+
+/// Open a fresh tempdir-backed pool and seed it with interval observations.
+///
+/// All observations share one `source_documents` row. Returns the pool and
+/// that row's id.
+pub(crate) async fn seed_interval_observations(
+    observations: &[IntervalObsSpec],
+) -> (SqlitePool, i64) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("test.db");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    std::mem::forget(dir);
+    let pool = open_pool(&url).await.expect("open pool");
+
+    let archive_key =
+        BlobKey::from_hex_str("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            .expect("valid key");
+
+    let source_document_id = insert_source_document(
+        &pool,
+        InsertSourceDocumentParams {
+            archive_key: &archive_key,
+            kind: "ccda",
+            source: "test",
+            original_filename: None,
+            archived_at: OffsetDateTime::now_utc(),
+        },
+    )
+    .await
+    .expect("seed source_document");
+
+    for spec in observations {
+        insert_observation(
+            &pool,
+            InsertObservationParams {
+                source_document_id,
+                coding_system: spec.coding_system,
+                coding_code: spec.coding_code,
+                coding_display: None,
+                effective_start: spec.effective_start,
+                effective_end: Some(spec.effective_end),
+                value_quantity: Some(spec.value_quantity),
+                value_string: None,
+                value_unit: None,
+            },
+        )
+        .await
+        .expect("seed interval observation");
+    }
+
+    (pool, source_document_id)
+}

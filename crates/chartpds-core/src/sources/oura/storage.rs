@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 use super::api::OuraSleepSession;
 use super::parser::{self, ParsedSleepObservation};
 use crate::archive::{Archive, BlobKey, Manifest};
-use crate::clinical::{AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM};
+use crate::clinical::{
+    AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM, LOINC_SLEEP_DURATION, SYSTEM_LOINC,
+};
 use crate::index;
 use crate::sources;
 
@@ -120,6 +122,24 @@ async fn index_sleep_session(
         insert_sleep_observation(pool, source_document_id, obs).await?;
     }
 
+    if let Some(nightly) = parser::nightly_sleep_duration(session)? {
+        index::insert_observation(
+            pool,
+            index::InsertObservationParams {
+                source_document_id,
+                coding_system: SYSTEM_LOINC,
+                coding_code: LOINC_SLEEP_DURATION,
+                coding_display: Some("Sleep duration"),
+                effective_start: nightly.effective_start,
+                effective_end: Some(nightly.effective_end),
+                value_quantity: Some(nightly.minutes),
+                value_string: None,
+                value_unit: Some("min"),
+            },
+        )
+        .await?;
+    }
+
     let now_str = OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
@@ -214,21 +234,59 @@ mod tests {
         let observations = list_observations_by_source_document(&pool, doc_id)
             .await
             .expect("list");
-        assert_eq!(observations.len(), 4);
 
-        // First observation: Wake (stage 0)
-        assert_eq!(observations[0].coding_system, AASM_SLEEP_STAGE_SYSTEM);
-        assert_eq!(observations[0].coding_code, AASM_SLEEP_STAGE_CODE);
-        assert_eq!(observations[0].value_string.as_deref(), Some("wake"));
-        assert_eq!(observations[0].value_quantity, Some(0.0));
+        // 4 per-epoch AASM rows + 1 nightly LOINC sleep-duration row.
+        let epochs: Vec<_> = observations
+            .iter()
+            .filter(|o| o.coding_code == AASM_SLEEP_STAGE_CODE)
+            .collect();
+        assert_eq!(epochs.len(), 4);
+        assert_eq!(epochs[0].value_string.as_deref(), Some("wake"));
+        assert_eq!(epochs[3].value_string.as_deref(), Some("n3"));
 
-        // Third observation: N2 (stage 2)
-        assert_eq!(observations[2].value_string.as_deref(), Some("n2"));
-        assert_eq!(observations[2].value_quantity, Some(2.0));
+        let nightly: Vec<_> = observations
+            .iter()
+            .filter(|o| o.coding_code == LOINC_SLEEP_DURATION)
+            .collect();
+        assert_eq!(nightly.len(), 1);
+        assert_eq!(nightly[0].coding_system, SYSTEM_LOINC);
+        // 28800 s / 60 = 480 min.
+        assert_eq!(nightly[0].value_quantity, Some(480.0));
+        assert_eq!(nightly[0].value_unit.as_deref(), Some("min"));
+    }
 
-        // Fourth observation: N3 (stage 3)
-        assert_eq!(observations[3].value_string.as_deref(), Some("n3"));
-        assert_eq!(observations[3].value_quantity, Some(3.0));
+    #[tokio::test]
+    async fn nap_session_emits_no_nightly_duration() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+
+        let session = OuraSleepSession {
+            id: "nap-1".to_owned(),
+            day: "2026-01-15".to_owned(),
+            bedtime_start: "2026-01-15T13:00:00Z".to_owned(),
+            bedtime_end: "2026-01-15T13:30:00Z".to_owned(),
+            session_type: "late_nap".to_owned(),
+            sleep_phase_5_min: "22".to_owned(),
+            total_sleep_duration: Some(1800),
+            rem_sleep_duration: None,
+            deep_sleep_duration: None,
+            light_sleep_duration: None,
+        };
+        let raw = serde_json::json!({ "id": "nap-1" });
+        let doc_id = ingest_session(&archive, &pool, &session, &raw)
+            .await
+            .expect("ingest");
+
+        let observations = list_observations_by_source_document(&pool, doc_id)
+            .await
+            .expect("list");
+        assert!(observations
+            .iter()
+            .all(|o| o.coding_code == AASM_SLEEP_STAGE_CODE));
     }
 
     #[tokio::test]
