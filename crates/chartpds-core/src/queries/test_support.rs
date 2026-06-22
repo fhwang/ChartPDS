@@ -54,6 +54,7 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
             source: "test",
             original_filename: None,
             archived_at: OffsetDateTime::now_utc(),
+            document_date: None,
         },
     )
     .await
@@ -120,6 +121,7 @@ pub(crate) async fn seed_interval_observations(
             source: "test",
             original_filename: None,
             archived_at: OffsetDateTime::now_utc(),
+            document_date: None,
         },
     )
     .await

@@ -10,7 +10,7 @@ use crate::index::{
     InsertMedicationParams, InsertObservationParams, InsertProblemParams,
     InsertSourceDocumentParams,
 };
-use crate::ingestion::ccda::parse::parse_xml;
+use crate::ingestion::ccda::parse::{extract_document_date, parse_xml};
 use crate::ingestion::ccda::self_check::self_check;
 use crate::ingestion::ccda::{
     extract_medications, extract_observations, extract_problems, extract_results,
@@ -75,6 +75,7 @@ pub async fn ingest(
     })?;
     let doc = parse_xml(xml)?;
     self_check(&doc)?;
+    let document_date = extract_document_date(&doc);
 
     // 3. Extract observations, problems, and medications. Vital signs and lab
     // results are both observations and share the observations table.
@@ -92,6 +93,7 @@ pub async fn ingest(
             source,
             original_filename,
             archived_at,
+            document_date: document_date.as_deref(),
         },
     )
     .await?;
@@ -254,6 +256,30 @@ mod tests {
         .expect_err("ingest should reject non-UTF-8 input");
 
         assert!(matches!(err, crate::ingestion::Error::NotCcda { .. }));
+    }
+
+    #[tokio::test]
+    async fn ingest_stores_ccda_document_date() {
+        let (pool, archive) = fresh_pool_and_archive().await;
+        let id = ingest(
+            &archive,
+            &pool,
+            Bytes::from_static(VALID),
+            "ccda",
+            "test",
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .expect("ingest");
+
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT document_date FROM source_documents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(row.0.as_deref(), Some("2026-01-01"));
     }
 
     #[tokio::test]

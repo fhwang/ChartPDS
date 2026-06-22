@@ -111,6 +111,7 @@ async fn index_sleep_session(
             source: SOURCE,
             original_filename: Some(original_filename),
             archived_at,
+            document_date: Some(&session.day),
         },
     )
     .await?;
@@ -198,6 +199,39 @@ mod tests {
     use crate::index::{list_observations_by_source_document, open_pool};
     use object_store::memory::InMemory;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn ingest_session_stores_document_date() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        let session = OuraSleepSession {
+            id: "doc-date-1".to_owned(),
+            day: "2026-01-15".to_owned(),
+            bedtime_start: "2026-01-14T22:00:00Z".to_owned(),
+            bedtime_end: "2026-01-15T06:00:00Z".to_owned(),
+            session_type: "long_sleep".to_owned(),
+            sleep_phase_5_min: "12".to_owned(),
+            total_sleep_duration: None,
+            rem_sleep_duration: None,
+            deep_sleep_duration: None,
+            light_sleep_duration: None,
+        };
+        let raw = serde_json::json!({"id": "doc-date-1"});
+        let id = ingest_session(&archive, &pool, &session, &raw)
+            .await
+            .expect("ingest");
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT document_date FROM source_documents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(row.0.as_deref(), Some("2026-01-15"));
+    }
 
     #[tokio::test]
     async fn ingest_session_archives_and_inserts_observations() {

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id AS \"id!: i64\",\n               source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               status, onset_date\n        FROM problems\n        ORDER BY onset_date, coding_code\n        ",
+  "query": "\n        SELECT id AS \"id!: i64\", archive_key, kind, source, original_filename, archived_at AS \"archived_at: OffsetDateTime\", document_date\n        FROM source_documents\n        WHERE archive_key = ?\n        ",
   "describe": {
     "columns": [
       {
@@ -9,41 +9,41 @@
         "type_info": "Integer"
       },
       {
-        "name": "source_document_id!: i64",
+        "name": "archive_key",
         "ordinal": 1,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "coding_system",
+        "name": "kind",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "coding_code",
+        "name": "source",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "coding_display",
+        "name": "original_filename",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "status",
+        "name": "archived_at: OffsetDateTime",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "onset_date",
+        "name": "document_date",
         "ordinal": 6,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
-      false,
+      true,
       false,
       false,
       false,
@@ -52,5 +52,5 @@
       true
     ]
   },
-  "hash": "7a49a968bdc4dc7f9bdd9dc4ccaccb153603bb79a30d473c1d0b02d44e23c915"
+  "hash": "8ec1745311847eb6eba8d58e4212610cb18eb072d718deaa8d1c049de28e343c"
 }

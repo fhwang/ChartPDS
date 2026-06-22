@@ -204,31 +204,31 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "List all problems (diagnoses) in the index. Returns a JSON array of problems, ordered by onset date."
+        description = "Current problems (diagnoses), deduped to one entry per code. Returns {latest_document_date, items:[{coding_system, coding_code, coding_display, status, onset_date, document_count, first_seen, last_seen}]}. NOTE: `status` is the raw source-asserted value and is UNRELIABLE. To judge whether a problem is current, compare its `last_seen` against `latest_document_date` (a code absent from the newest document is likely resolved)."
     )]
     async fn list_problems(
         &self,
         Parameters(_args): Parameters<ObservationCountsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let problems = chartpds_core::queries::list_problems(&self.pool)
+        let result = chartpds_core::queries::current_problems(&self.pool)
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
-        let json = serde_json::to_string(&problems)
+        let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     #[tool(
-        description = "List all medications in the index. Returns a JSON array of medications, ordered by start date."
+        description = "Current medications, deduped to one entry per code. Returns {latest_document_date, items:[{coding_system, coding_code, coding_display, status, dose, route, start_date, end_date, document_count, first_seen, last_seen}]}. NOTE: `status` is the raw source-asserted value and is UNRELIABLE. To judge whether a medication is current, compare its `last_seen` against `latest_document_date` and treat a past `end_date` as discontinued."
     )]
     async fn list_medications(
         &self,
         Parameters(_args): Parameters<ObservationCountsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let meds = chartpds_core::queries::list_medications(&self.pool)
+        let result = chartpds_core::queries::current_medications(&self.pool)
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
-        let json = serde_json::to_string(&meds)
+        let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -383,7 +383,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Sync a data source (or all configured sources). Fetches recent data, archives it, and indexes observations. Returns a summary of days synced and samples collected."
+        description = "Sync a data source (or all configured sources). Returns {results:[{source, ok, days_synced?, total_samples?, reason?, message?}]}. A sync failure is reported in-band as ok:false with a reason in {reauth_required, no_credentials, transient, parse_error, archive_error, database_error}; the tool call itself still succeeds so the caller can render against stale data. Syncing all sources skips unconfigured ones."
     )]
     async fn sync_source(
         &self,
@@ -391,52 +391,31 @@ impl ChartPdsServer {
     ) -> Result<CallToolResult, McpError> {
         let window_days = args.window_days.unwrap_or(8);
 
-        match args.source.as_deref() {
-            Some("fitbit") => self.sync_fitbit_inner(window_days).await,
-            Some("oura") => self.sync_oura_inner(window_days).await,
-            Some(other) => Err(McpError::invalid_params(
-                format!("unknown source {other:?}; known sources: fitbit, oura"),
-                None,
-            )),
-            None => {
-                // Sync all configured sources, collect results.
-                let mut summaries: Vec<String> = Vec::new();
-                let mut errors: Vec<String> = Vec::new();
-
-                // Try Fitbit (only if oauth_config is present).
-                if self.oauth_config.is_some() {
-                    match self.sync_fitbit_inner(window_days).await {
-                        Ok(r) => summaries.push(format!("fitbit: {}", Self::result_text(&r))),
-                        Err(e) => errors.push(format!("fitbit: {}", e.message)),
-                    }
-                }
-
-                // Try Oura (only if a token is resolvable).
-                if self.resolve_oura_token().await.is_ok() {
-                    match self.sync_oura_inner(window_days).await {
-                        Ok(r) => summaries.push(format!("oura: {}", Self::result_text(&r))),
-                        Err(e) => errors.push(format!("oura: {}", e.message)),
-                    }
-                }
-
-                if summaries.is_empty() && errors.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "No sources configured. Use connect_source to set up fitbit or oura.",
-                    )]));
-                }
-
-                let mut parts: Vec<String> = Vec::new();
-                if !summaries.is_empty() {
-                    parts.push(summaries.join("\n"));
-                }
-                if !errors.is_empty() {
-                    parts.push(format!("Errors:\n{}", errors.join("\n")));
-                }
-                Ok(CallToolResult::success(vec![Content::text(
-                    parts.join("\n\n"),
-                )]))
+        let results: Vec<serde_json::Value> = match args.source.as_deref() {
+            Some("fitbit") => vec![self.sync_fitbit_structured(window_days).await],
+            Some("oura") => vec![self.sync_oura_structured(window_days).await],
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!("unknown source {other:?}; known sources: fitbit, oura"),
+                    None,
+                ))
             }
-        }
+            None => {
+                let mut out = Vec::new();
+                if self.oauth_config.is_some() {
+                    out.push(self.sync_fitbit_structured(window_days).await);
+                }
+                if self.resolve_oura_token().await.is_ok() {
+                    out.push(self.sync_oura_structured(window_days).await);
+                }
+                out
+            }
+        };
+
+        let payload = serde_json::json!({ "results": results });
+        let text = serde_json::to_string(&payload)
+            .map_err(|err| McpError::internal_error(format!("serializing result: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(
@@ -569,16 +548,17 @@ impl ChartPdsServer {
         })
     }
 
-    /// Sync Fitbit heart-rate data for the given window.
-    async fn sync_fitbit_inner(&self, window_days: i64) -> Result<CallToolResult, McpError> {
-        let oauth_config = self.oauth_config.as_ref().ok_or_else(|| {
-            McpError::invalid_params(
-                "GOOGLE_HEALTH_CLIENT_ID and GOOGLE_HEALTH_CLIENT_SECRET must be set",
-                None,
-            )
-        })?;
-
-        let result = chartpds_core::sources::fitbit::sync::sync_recent_days(
+    /// Sync Fitbit and return a per-source structured result object.
+    async fn sync_fitbit_structured(&self, window_days: i64) -> serde_json::Value {
+        let Some(oauth_config) = self.oauth_config.as_ref() else {
+            return serde_json::json!({
+                "source": "fitbit",
+                "ok": false,
+                "reason": "no_credentials",
+                "message": "GOOGLE_HEALTH_CLIENT_ID and GOOGLE_HEALTH_CLIENT_SECRET must be set"
+            });
+        };
+        match chartpds_core::sources::fitbit::sync::sync_recent_days(
             &self.archive,
             &self.pool,
             &self.http_client,
@@ -586,23 +566,33 @@ impl ChartPdsServer {
             window_days,
         )
         .await
-        .map_err(|err| McpError::internal_error(format!("sync failed: {err}"), None))?;
-
-        let json = serde_json::json!({
-            "days_synced": result.days_synced,
-            "total_samples": result.total_samples,
-        });
-        let text = serde_json::to_string(&json)
-            .map_err(|err| McpError::internal_error(format!("serializing result: {err}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        {
+            Ok(r) => serde_json::json!({
+                "source": "fitbit",
+                "ok": true,
+                "days_synced": r.days_synced,
+                "total_samples": r.total_samples
+            }),
+            Err(e) => serde_json::json!({
+                "source": "fitbit",
+                "ok": false,
+                "reason": e.reason_code(),
+                "message": e.to_string()
+            }),
+        }
     }
 
-    /// Sync Oura sleep data for the given window.
-    async fn sync_oura_inner(&self, window_days: i64) -> Result<CallToolResult, McpError> {
-        let access_token = self.resolve_oura_token().await?;
-
-        let result = chartpds_core::sources::oura::sync::sync_recent_days(
+    /// Sync Oura and return a per-source structured result object.
+    async fn sync_oura_structured(&self, window_days: i64) -> serde_json::Value {
+        let Ok(access_token) = self.resolve_oura_token().await else {
+            return serde_json::json!({
+                "source": "oura",
+                "ok": false,
+                "reason": "no_credentials",
+                "message": "No Oura PAT found. Call connect_source with source=\"oura\" first or set OURA_PERSONAL_ACCESS_TOKEN."
+            });
+        };
+        match chartpds_core::sources::oura::sync::sync_recent_days(
             &self.archive,
             &self.pool,
             &self.http_client,
@@ -610,28 +600,20 @@ impl ChartPdsServer {
             window_days,
         )
         .await
-        .map_err(|err| McpError::internal_error(format!("oura sync failed: {err}"), None))?;
-
-        let json = serde_json::json!({
-            "days_synced": result.days_synced,
-            "total_samples": result.total_samples,
-        });
-        let text = serde_json::to_string(&json)
-            .map_err(|err| McpError::internal_error(format!("serializing result: {err}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
-
-    /// Extract the text content from a [`CallToolResult`] for summary building.
-    fn result_text(result: &CallToolResult) -> String {
-        result
-            .content
-            .first()
-            .and_then(|c| match &c.raw {
-                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
+        {
+            Ok(r) => serde_json::json!({
+                "source": "oura",
+                "ok": true,
+                "days_synced": r.days_synced,
+                "total_samples": r.total_samples
+            }),
+            Err(e) => serde_json::json!({
+                "source": "oura",
+                "ok": false,
+                "reason": e.reason_code(),
+                "message": e.to_string()
+            }),
+        }
     }
 }
 
@@ -689,6 +671,7 @@ mod tests {
                 source: "test",
                 original_filename: None,
                 archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
             },
         )
         .await
@@ -895,9 +878,11 @@ mod tests {
             _ => panic!("expected text content"),
         };
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        let arr = value.as_array().expect("expected array");
+        assert!(value["latest_document_date"].is_string());
+        let arr = value["items"].as_array().expect("expected items array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["coding_code"], "44054006");
+        assert_eq!(arr[0]["document_count"], 1);
     }
 
     #[tokio::test]
@@ -927,9 +912,11 @@ mod tests {
             _ => panic!("expected text content"),
         };
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        let arr = value.as_array().expect("expected array");
+        assert!(value["latest_document_date"].is_string());
+        let arr = value["items"].as_array().expect("expected items array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["coding_code"], "860975");
+        assert_eq!(arr[0]["document_count"], 1);
     }
 
     #[tokio::test]
@@ -1031,6 +1018,7 @@ mod tests {
                 source: "test",
                 original_filename: None,
                 archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
             },
         )
         .await
@@ -1120,6 +1108,7 @@ mod tests {
                 source: "test",
                 original_filename: None,
                 archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
             },
         )
         .await
@@ -1258,5 +1247,69 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn sync_source_fitbit_without_credentials_reports_no_credentials() {
+        let server = fresh_server_with_empty_db().await;
+        let result = server
+            .sync_source(Parameters(SyncSourceArgs {
+                source: Some("fitbit".to_owned()),
+                window_days: None,
+            }))
+            .await
+            .expect("tool call succeeds (failure is in-band)");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        let arr = value["results"].as_array().expect("results array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["source"], "fitbit");
+        assert_eq!(arr[0]["ok"], false);
+        assert_eq!(arr[0]["reason"], "no_credentials");
+    }
+
+    #[tokio::test]
+    async fn sync_source_oura_without_credentials_reports_no_credentials() {
+        std::env::remove_var("OURA_PERSONAL_ACCESS_TOKEN");
+        let server = fresh_server_with_empty_db().await;
+        let result = server
+            .sync_source(Parameters(SyncSourceArgs {
+                source: Some("oura".to_owned()),
+                window_days: None,
+            }))
+            .await
+            .expect("tool call succeeds (failure is in-band)");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        let arr = value["results"].as_array().expect("results array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["source"], "oura");
+        assert_eq!(arr[0]["ok"], false);
+        assert_eq!(arr[0]["reason"], "no_credentials");
+    }
+
+    #[tokio::test]
+    async fn sync_source_all_with_nothing_configured_returns_empty_results() {
+        std::env::remove_var("OURA_PERSONAL_ACCESS_TOKEN");
+        let server = fresh_server_with_empty_db().await;
+        let result = server
+            .sync_source(Parameters(SyncSourceArgs {
+                source: None,
+                window_days: None,
+            }))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(value["results"].as_array().expect("array").len(), 0);
     }
 }

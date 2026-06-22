@@ -22,6 +22,10 @@ pub struct SourceDocument {
     /// preserved across index rebuilds (sourced from the blob's sidecar
     /// manifest), not stamped at projection time.
     pub archived_at: OffsetDateTime,
+    /// The calendar date this document pertains to (`YYYY-MM-DD`): CCDA authored
+    /// date, Fitbit day, or Oura sleep day. `None` when unknown. Distinct from
+    /// `archived_at`.
+    pub document_date: Option<String>,
 }
 
 /// Parameters for [`insert`].
@@ -36,6 +40,8 @@ pub struct InsertParams<'a> {
     pub original_filename: Option<&'a str>,
     /// Wall-clock time the blob entered the archive (archive-entry time).
     pub archived_at: OffsetDateTime,
+    /// The calendar date this document pertains to (`YYYY-MM-DD`), if known.
+    pub document_date: Option<&'a str>,
 }
 
 /// Insert a new `source_documents` row.
@@ -50,8 +56,8 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
     let archive_key = params.archive_key.as_str();
     let row = sqlx::query!(
         r#"
-        INSERT INTO source_documents (archive_key, kind, source, original_filename, archived_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO source_documents (archive_key, kind, source, original_filename, archived_at, document_date)
+        VALUES (?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
         archive_key,
@@ -59,6 +65,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         params.source,
         params.original_filename,
         params.archived_at,
+        params.document_date,
     )
     .fetch_one(pool)
     .await?;
@@ -86,7 +93,7 @@ pub async fn fetch_by_archive_key(
     let key_str = archive_key.as_str();
     let row = sqlx::query!(
         r#"
-        SELECT id AS "id!: i64", archive_key, kind, source, original_filename, archived_at AS "archived_at: OffsetDateTime"
+        SELECT id AS "id!: i64", archive_key, kind, source, original_filename, archived_at AS "archived_at: OffsetDateTime", document_date
         FROM source_documents
         WHERE archive_key = ?
         "#,
@@ -103,6 +110,7 @@ pub async fn fetch_by_archive_key(
         source: r.source,
         original_filename: r.original_filename,
         archived_at: r.archived_at,
+        document_date: r.document_date,
     }))
 }
 
@@ -139,6 +147,7 @@ mod tests {
                 source: "manual-upload",
                 original_filename: Some("ccd.xml"),
                 archived_at,
+                document_date: None,
             },
         )
         .await
@@ -170,6 +179,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_persists_document_date() {
+        let pool = fresh_pool().await;
+        let archive_key = BlobKey::from_hex_str(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect("valid key");
+        insert(
+            &pool,
+            InsertParams {
+                archive_key: &archive_key,
+                kind: "ccda",
+                source: "test",
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+                document_date: Some("2026-01-01"),
+            },
+        )
+        .await
+        .expect("insert");
+        let row = fetch_by_archive_key(&pool, &archive_key)
+            .await
+            .expect("fetch")
+            .expect("row");
+        assert_eq!(row.document_date.as_deref(), Some("2026-01-01"));
+    }
+
+    #[tokio::test]
     async fn insert_rejects_duplicate_archive_key() {
         let pool = fresh_pool().await;
         let archive_key = BlobKey::from_hex_str(
@@ -186,6 +222,7 @@ mod tests {
                 source: "src",
                 original_filename: None,
                 archived_at,
+                document_date: None,
             },
         )
         .await
@@ -199,6 +236,7 @@ mod tests {
                 source: "src",
                 original_filename: None,
                 archived_at,
+                document_date: None,
             },
         )
         .await;

@@ -179,13 +179,7 @@ pub(crate) async fn record_sync_error(pool: &SqlitePool, source_name: &str, err:
 
 /// Map an adapter error variant to a machine-readable reason code.
 fn error_reason_code(err: &sources::Error) -> &'static str {
-    match err {
-        sources::Error::ReauthRequired { .. } => "reauth_required",
-        sources::Error::Transient { .. } => "transient",
-        sources::Error::Parse { .. } => "parse_error",
-        sources::Error::Archive(_) => "archive_error",
-        sources::Error::Database(_) => "database_error",
-    }
+    err.reason_code()
 }
 
 /// Get the current UTC time as an RFC 3339 string.

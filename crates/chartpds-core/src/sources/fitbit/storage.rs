@@ -132,6 +132,7 @@ async fn index_intraday_day(
             source: SOURCE,
             original_filename: Some(original_filename),
             archived_at,
+            document_date: Some(date),
         },
     )
     .await?;
@@ -192,6 +193,30 @@ mod tests {
     use crate::sources::fitbit::api::{HeartRateSample, IntradayResult};
     use object_store::memory::InMemory;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn ingest_day_stores_document_date() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        let result = IntradayResult {
+            samples: vec![],
+            raw_pages: vec![],
+        };
+        let id = ingest_day(&archive, &pool, "2026-01-01", &result)
+            .await
+            .expect("ingest_day");
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT document_date FROM source_documents WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(row.0.as_deref(), Some("2026-01-01"));
+    }
 
     #[tokio::test]
     async fn ingest_day_archives_and_inserts_observations() {

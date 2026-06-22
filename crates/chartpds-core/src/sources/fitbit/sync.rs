@@ -28,7 +28,7 @@ async fn refresh_access_token(
     let creds = index::get_source_credentials(pool, "fitbit")
         .await
         .map_err(sources::Error::Database)?
-        .ok_or_else(|| sources::Error::ReauthRequired {
+        .ok_or_else(|| sources::Error::NoCredentials {
             reason: "no credentials found for fitbit — run the connect flow first".to_owned(),
         })?;
 

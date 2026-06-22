@@ -152,6 +152,7 @@ mod tests {
                 source: "test",
                 original_filename: None,
                 archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
             },
         )
         .await
