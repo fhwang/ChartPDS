@@ -44,10 +44,12 @@ POSIX `sh` script. Responsibilities:
 - Glob `docs/superpowers/specs/*.md` and `docs/superpowers/plans/*.md`.
 - For each file, extract a leading `YYYY-MM-DD` from the basename. Skip files
   with no valid prefix.
-- Convert the prefix to an epoch day using GNU `date -d "$prefix" +%s` (the
-  Ubuntu runner has GNU date). Skip if `date` rejects it.
-- Compute age in whole days against "now" (`date +%s`). Delete with
-  `git rm --quiet "$file"` when `age_days >= MAX_AGE_DAYS`.
+- Convert the prefix to an epoch day using pure shell integer arithmetic
+  (Hinnant's days-from-civil algorithm). Skip if the prefix is not a valid
+  calendar date.
+- Compute age in whole days against "today" (also converted via the same
+  arithmetic). Delete with `git rm --quiet "$file"` when
+  `age_days >= MAX_AGE_DAYS`.
 - Flags:
   - `--max-age-days N` (default `30`).
   - `--dry-run` — print each file it *would* delete (and the reason), touch
@@ -71,9 +73,10 @@ do.
   1. `actions/checkout@v5`.
   2. Run `scripts/scrub-old-docs.sh` (real, not dry-run). It `git rm`s stale
      files into the working tree / index.
-  3. If `git status --porcelain` is empty, log "nothing to scrub" and end the
-     job successfully — no branch, no PR.
-  4. Otherwise: configure a bot git identity, commit the deletions to the stable
+  3. If `git diff --cached --name-only --diff-filter=D` is empty (no staged
+     deletions), log "nothing to scrub" and end the job successfully — no
+     branch, no PR.
+  4. Otherwise: configure a bot git identity, commit the staged deletions to the stable
      branch `chore/scrub-old-docs` (reset/force the branch to current `main`
      plus this commit so each run is a clean single-commit delta), and push.
   5. Open a PR from `chore/scrub-old-docs` into `main` via the preinstalled
@@ -92,8 +95,10 @@ do.
 - **Stable branch, dedup'd PR.** A single long-lived `chore/scrub-old-docs`
   branch avoids piling up one open PR per week. Each run rebases it onto current
   `main`, so a merged-then-reopened cycle stays clean.
-- **No new dependencies.** Uses only `git`, GNU `date`, and `gh` — all present
-  on `ubuntu-latest`. Consistent with the repo's `cargo deny` / `cargo machete`
+- **No new dependencies.** Uses only `git`, POSIX `sh` (the age computation is
+  pure integer arithmetic; the only `date` call is `date -u +%Y-%m-%d` for the
+  default "today", which is portable), and `gh` — all present on
+  `ubuntu-latest`. Consistent with the repo's `cargo deny` / `cargo machete`
   dependency discipline.
 
 ## Testing
