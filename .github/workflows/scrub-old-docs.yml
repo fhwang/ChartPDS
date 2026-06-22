@@ -1,0 +1,53 @@
+name: Scrub old docs
+
+on:
+  schedule:
+    - cron: '0 7 * * 1' # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: scrub-old-docs
+  cancel-in-progress: false
+
+jobs:
+  scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Scrub stale docs
+        run: sh scripts/scrub-old-docs.sh
+
+      - name: Detect deletions
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to scrub."
+          fi
+
+      - name: Open or update scrub PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          branch=chore/scrub-old-docs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git commit -m "chore: scrub stale superpowers docs"
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$branch" --base main \
+              --title "chore: scrub stale superpowers docs" \
+              --body "Automated removal of \`docs/superpowers/{specs,plans}\` markdown older than 30 days (by filename date). Opened by the scrub-old-docs workflow."
+          else
+            echo "PR already open for $branch; force-push updated it in place."
+          fi
