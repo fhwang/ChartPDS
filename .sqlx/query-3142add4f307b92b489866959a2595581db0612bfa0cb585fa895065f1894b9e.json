@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(document_date) AS \"latest?: String\" FROM source_documents",
+  "describe": {
+    "columns": [
+      {
+        "name": "latest?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "3142add4f307b92b489866959a2595581db0612bfa0cb585fa895065f1894b9e"
+}

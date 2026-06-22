@@ -158,10 +158,13 @@ failing the whole document. Note Epic encodes calculated LDL-C as a
 
 `queries::` holds generic analytical primitives over the index.
 Currently: `latest_by_code`, `in_range`, `counts_per_code`,
-`list_problems`, `list_medications`, `duration_in_value_range`,
+`current_problems`, `current_medications`, `duration_in_value_range`,
 `longest_continuous_in_value_range`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
+The `current_problems` and `current_medications` primitives return deduped
+lists with per-code provenance, replacing the earlier `list_problems` and
+`list_medications` functions.
 Both `duration_in_value_range` and `longest_continuous_in_value_range`
 select observations by `{coding_system, coding_code}`; day bucketing uses
 the UTC calendar day of the interval or run start. They attribute that day
@@ -191,10 +194,17 @@ and the local-FS archive at `$DIR/archive/`, and serves 12 tools:
 - `observation_counts` — count observations per code
 - `observation_duration_in_range` — total minutes a coded signal spent in a value range
 - `observation_longest_period_in_range` — longest continuous in-range run per day
-- `list_problems` — all problems (diagnoses)
-- `list_medications` — all medications
+- `list_problems` — current problems (diagnoses), deduped to one entry per
+  code with provenance (`document_count`, `first_seen`, `last_seen`) and the
+  archive's `latest_document_date`; `status` is the raw source value and is
+  unreliable for active/resolved
+- `list_medications` — current medications, deduped per code with the same
+  provenance shape
 - `connect_source` — connect a data source (fitbit OAuth or oura PAT)
-- `sync_source` — sync one or all configured data sources
+- `sync_source` — sync one or all sources; returns `{results:[{source, ok,
+  days_synced?, total_samples?, reason?, message?}]}` with failures reported
+  in-band (reason ∈ reauth_required, no_credentials, transient, parse_error,
+  archive_error, database_error)
 - `rebuild_index` — drop and rebuild the index from archived blobs
 - `list_notifications` — list recent notification log entries (newest first)
 
