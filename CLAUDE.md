@@ -157,7 +157,7 @@ failing the whole document. Note Epic encodes calculated LDL-C as a
 ## Queries
 
 `queries::` holds generic analytical primitives over the index.
-Currently: `latest_by_code`, `in_range`, `counts_per_code`,
+Currently: `latest_by_code`, `observation_history`, `counts_per_code`,
 `current_problems`, `current_medications`, `duration_in_value_range`,
 `longest_continuous_in_value_range`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
@@ -165,6 +165,10 @@ there is no shared state and no struct-style query builder.
 The `current_problems` and `current_medications` primitives return deduped
 lists with per-code provenance, replacing the earlier `list_problems` and
 `list_medications` functions.
+`observation_history` accepts multiple `{system, code}` codings with optional
+open-ended bounds, replacing the earlier `in_range` function.
+`counts_per_code` returns per-`(system, code)` summaries including
+`count`, `first_effective_start`, and `last_effective_start`.
 Both `duration_in_value_range` and `longest_continuous_in_value_range`
 select observations by `{coding_system, coding_code}`; day bucketing uses
 the UTC calendar day of the interval or run start. They attribute that day
@@ -186,12 +190,17 @@ cache the new SQL.
 `chartpds-mcp` is the stdio MCP server binary. It reads
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
 e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`
-and the local-FS archive at `$DIR/archive/`, and serves 12 tools:
+and the local-FS archive at `$DIR/archive/`, and serves 13 tools:
 
 - `ingest_record` — ingest a CCDA document (write path)
 - `latest_observation_by_code` — most-recent observation by LOINC code
-- `observations_in_range` — observations in a time window
-- `observation_counts` — count observations per code
+- `get_observation_history` — observations across one or more `{system, code}` codings,
+  with optional open-ended `since`/`until` bounds (replaces `observations_in_range`)
+- `observation_counts` — discover codings present in the store: returns
+  `{coding_system, coding_code, count, first_effective_start, last_effective_start}`
+  per `(system, code)`
+- `describe_codings` — value-encoding semantics for the codings ChartPDS mints
+  (non-standard only; LOINC omitted as self-describing)
 - `observation_duration_in_range` — total minutes a coded signal spent in a value range
 - `observation_longest_period_in_range` — longest continuous in-range run per day
 - `list_problems` — current problems (diagnoses), deduped to one entry per
@@ -248,6 +257,12 @@ sleep stages as single characters: `1` = deep (AASM N3), `2` = light
 `coding_system` = `https://chartpds.fhwang.net/coding/aasm/sleep-stage`,
 `coding_code` = `aasm-sleep-stage`, `value_string` = stage name (e.g.
 `"n3"`), and `value_quantity` = stage discriminant (e.g. `3.0`).
+
+For each `long_sleep` night the adapter also emits two nightly summary
+observations: a total-sleep observation (LOINC `93832-4`, value in minutes)
+and a wake-after-sleep-onset (WASO) observation (LOINC `103215-0`, minutes
+awake after sleep onset), derived from the epoch stream. These land alongside
+the per-epoch `aasm-sleep-stage` observations in the `observations` table.
 
 The adapter code lives in `crates/chartpds-core/src/sources/oura/`.
 

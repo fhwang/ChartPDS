@@ -26,16 +26,45 @@ pub enum AasmSleepStage {
     Rem = 4,
 }
 
-impl std::fmt::Display for AasmSleepStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl AasmSleepStage {
+    /// All stages, ascending by discriminant. Drives the minted-coding
+    /// catalog so its value list cannot drift from the encoder.
+    pub const ALL: [AasmSleepStage; 5] = [Self::Wake, Self::N1, Self::N2, Self::N3, Self::Rem];
+
+    /// Stable lowercase token, identical to the stored `value_string`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
             Self::Wake => "wake",
             Self::N1 => "n1",
             Self::N2 => "n2",
             Self::N3 => "n3",
             Self::Rem => "rem",
-        };
-        f.write_str(s)
+        }
+    }
+
+    /// Human-facing label for catalog/display use.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Wake => "awake",
+            Self::N1 => "light sleep (N1, transition)",
+            Self::N2 => "light sleep (N2)",
+            Self::N3 => "deep / slow-wave sleep (N3)",
+            Self::Rem => "REM",
+        }
+    }
+
+    /// Numeric discriminant as stored in `value_quantity`.
+    #[must_use]
+    pub fn discriminant(&self) -> u8 {
+        *self as u8
+    }
+}
+
+impl std::fmt::Display for AasmSleepStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

@@ -9,23 +9,23 @@ mod counts_per_code;
 mod current_medications;
 mod current_problems;
 mod duration_in_value_range;
-mod in_range;
 mod latest_by_code;
 mod list_notifications;
 mod longest_continuous_in_value_range;
+mod observation_history;
 #[cfg(test)]
 mod test_support;
 
-pub use counts_per_code::{counts_per_code, CodeCount};
+pub use counts_per_code::{counts_per_code, MetricSummary};
 pub use current_medications::{current_medications, CurrentMedication, CurrentMedications};
 pub use current_problems::{current_problems, CurrentProblem, CurrentProblems};
 pub use duration_in_value_range::{
     duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInValueRangeParams,
 };
-pub use in_range::in_range;
 pub use latest_by_code::latest_by_code;
 pub use list_notifications::list_recent_notifications;
 pub use longest_continuous_in_value_range::{
     longest_continuous_in_value_range, BucketLongest, LongestContinuousInRange,
     LongestContinuousParams,
 };
+pub use observation_history::{observation_history, CodingKey};
