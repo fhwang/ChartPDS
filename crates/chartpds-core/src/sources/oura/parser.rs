@@ -132,6 +132,78 @@ pub fn nightly_sleep_duration(
     }))
 }
 
+/// A derived Wake-After-Sleep-Onset summary for one night.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedWaso {
+    /// Session start (observation `effective_start`).
+    pub effective_start: OffsetDateTime,
+    /// Session end (observation `effective_end`).
+    pub effective_end: OffsetDateTime,
+    /// Wake minutes between sleep onset and final awakening.
+    pub minutes: f64,
+}
+
+/// Derive Wake-After-Sleep-Onset (WASO) for a session.
+///
+/// WASO is the wake time between sleep onset (first non-wake epoch) and final
+/// awakening (last non-wake epoch); pre-onset latency and post-waking time are
+/// excluded by construction. Returns `Some(0.0)` for an unbroken night and
+/// `None` when the session never reaches sleep (or is not a `long_sleep`).
+///
+/// # Errors
+///
+/// Returns [`sources::Error::Parse`] if `bedtime_start`/`bedtime_end` is not
+/// valid RFC 3339, or if `sleep_phase_5_min` contains an unknown stage char.
+///
+/// # Panics
+///
+/// Panics if the `rposition` call on `epochs` fails to find the last non-wake
+/// epoch after `onset` is confirmed to exist. This is unreachable by construction.
+pub fn wake_after_sleep_onset(session: &OuraSleepSession) -> sources::Result<Option<ParsedWaso>> {
+    if session.session_type != "long_sleep" {
+        return Ok(None);
+    }
+
+    let epochs = parse_sleep_epochs(&session.bedtime_start, &session.sleep_phase_5_min)?;
+
+    let Some(onset) = epochs.iter().position(|e| e.stage != AasmSleepStage::Wake) else {
+        return Ok(None);
+    };
+    let final_wake = epochs
+        .iter()
+        .rposition(|e| e.stage != AasmSleepStage::Wake)
+        .expect("onset exists, so a last non-wake epoch exists");
+
+    let wake_epochs = epochs[onset..=final_wake]
+        .iter()
+        .filter(|e| e.stage == AasmSleepStage::Wake)
+        .count();
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "epoch count and EPOCH_SECONDS for one night fit f64 without loss"
+    )]
+    let minutes = wake_epochs as f64 * EPOCH_SECONDS as f64 / 60.0;
+
+    let effective_start =
+        OffsetDateTime::parse(&session.bedtime_start, &Rfc3339).map_err(|err| {
+            sources::Error::Parse {
+                reason: format!("invalid bedtime_start {:?}: {err}", session.bedtime_start),
+            }
+        })?;
+    let effective_end = OffsetDateTime::parse(&session.bedtime_end, &Rfc3339).map_err(|err| {
+        sources::Error::Parse {
+            reason: format!("invalid bedtime_end {:?}: {err}", session.bedtime_end),
+        }
+    })?;
+
+    Ok(Some(ParsedWaso {
+        effective_start,
+        effective_end,
+        minutes,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +315,64 @@ mod tests {
     fn nightly_duration_none_for_nap() {
         let parsed = nightly_sleep_duration(&session("late_nap", Some(3600))).expect("parse");
         assert!(parsed.is_none());
+    }
+
+    fn waso_session(session_type: &str, phases: &str) -> OuraSleepSession {
+        OuraSleepSession {
+            id: "s1".to_owned(),
+            day: "2026-01-15".to_owned(),
+            bedtime_start: "2026-01-14T22:00:00Z".to_owned(),
+            bedtime_end: "2026-01-15T06:00:00Z".to_owned(),
+            session_type: session_type.to_owned(),
+            sleep_phase_5_min: phases.to_owned(),
+            total_sleep_duration: None,
+            rem_sleep_duration: None,
+            deep_sleep_duration: None,
+            light_sleep_duration: None,
+        }
+    }
+
+    #[test]
+    fn waso_counts_only_interior_wake() {
+        // W W N2 N2 W N1 REM -> onset idx 2, final idx 6, one interior wake.
+        let s = waso_session("long_sleep", "4422413");
+        let waso = wake_after_sleep_onset(&s).expect("ok").expect("some");
+        assert!((waso.minutes - 5.0).abs() < f64::EPSILON);
+        assert_eq!(waso.effective_start, datetime!(2026-01-14 22:00:00 UTC));
+        assert_eq!(waso.effective_end, datetime!(2026-01-15 06:00:00 UTC));
+    }
+
+    #[test]
+    fn waso_zero_for_unbroken_night() {
+        // N3 N3 REM -> onset idx 0, final idx 2, no interior wake.
+        let s = waso_session("long_sleep", "113");
+        let waso = wake_after_sleep_onset(&s).expect("ok").expect("some");
+        assert!((waso.minutes - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn waso_excludes_leading_and_trailing_wake() {
+        // W W N2 W N2 W W -> onset idx 2, final idx 4, one interior wake (idx 3).
+        let s = waso_session("long_sleep", "4424244");
+        let waso = wake_after_sleep_onset(&s).expect("ok").expect("some");
+        assert!((waso.minutes - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn waso_none_when_all_wake() {
+        let s = waso_session("long_sleep", "444");
+        assert!(wake_after_sleep_onset(&s).expect("ok").is_none());
+    }
+
+    #[test]
+    fn waso_none_when_empty() {
+        let s = waso_session("long_sleep", "");
+        assert!(wake_after_sleep_onset(&s).expect("ok").is_none());
+    }
+
+    #[test]
+    fn waso_none_for_nap() {
+        let s = waso_session("late_nap", "4224");
+        assert!(wake_after_sleep_onset(&s).expect("ok").is_none());
     }
 }

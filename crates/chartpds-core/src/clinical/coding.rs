@@ -23,6 +23,9 @@ pub const SYSTEM_SNOMED: &str = "http://snomed.info/sct";
 /// epochs. Stored in minutes (`value_unit = "min"`).
 pub const LOINC_SLEEP_DURATION: &str = "93832-4";
 
+/// LOINC code for Wake-After-Sleep-Onset (WASO), in minutes.
+pub const LOINC_WASO: &str = "103215-0";
+
 /// Translate a CCDA-style OID into its canonical FHIR system URI.
 ///
 /// Returns `None` for OIDs that are not in the known translation table.

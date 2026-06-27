@@ -1,36 +1,46 @@
-//! Number of observations per coding code.
+//! Per-coding discovery: which codings exist, how many, over what span.
 
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
-/// A `(coding_code, count)` pair returned by [`counts_per_code`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CodeCount {
-    /// The coding code (e.g. `"29463-7"` for body weight).
+/// One discovered coding present in the observations table.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MetricSummary {
+    /// FHIR coding system URI (e.g. `"http://loinc.org"` or the AASM URI).
+    pub coding_system: String,
+    /// Coding code within the system (e.g. `"29463-7"`).
     pub coding_code: String,
-    /// Number of observation rows with this code.
+    /// Number of observation rows for this `(system, code)`.
     pub count: i64,
+    /// Earliest `effective_start` for this coding (RFC 3339 on the wire).
+    #[serde(with = "time::serde::rfc3339")]
+    pub first_effective_start: OffsetDateTime,
+    /// Latest `effective_start` for this coding (RFC 3339 on the wire).
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_effective_start: OffsetDateTime,
 }
 
-/// Count observations grouped by coding code.
+/// Discover the codings present in the store, grouped by `(system, code)`.
 ///
-/// Returns one [`CodeCount`] per distinct `coding_code` present in the
-/// observations table, ordered alphabetically by code.
-///
-/// Today every observation has `coding_system = "http://loinc.org"`; once
-/// non-LOINC codes land (e.g. AASM sleep stages) the result shape may
-/// gain a `coding_system` field on [`CodeCount`].
+/// Returns one [`MetricSummary`] per distinct `(coding_system, coding_code)`,
+/// ordered by system then code. `count` is the row count; `first/last_
+/// effective_start` are the `MIN`/`MAX` of `effective_start` (lexical over the
+/// stored RFC 3339 text — the same ordering assumption the other queries use).
 ///
 /// # Errors
 ///
 /// Returns `sqlx::Error` if the query fails.
-pub async fn counts_per_code(pool: &SqlitePool) -> Result<Vec<CodeCount>, sqlx::Error> {
+pub async fn counts_per_code(pool: &SqlitePool) -> Result<Vec<MetricSummary>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
-        SELECT coding_code AS "coding_code!: String",
-               COUNT(*) AS "count!: i64"
+        SELECT coding_system AS "coding_system!: String",
+               coding_code AS "coding_code!: String",
+               COUNT(*)    AS "count!: i64",
+               MIN(effective_start) AS "first_effective_start!: OffsetDateTime",
+               MAX(effective_start) AS "last_effective_start!: OffsetDateTime"
         FROM observations
-        GROUP BY coding_code
-        ORDER BY coding_code
+        GROUP BY coding_system, coding_code
+        ORDER BY coding_system, coding_code
         "#,
     )
     .fetch_all(pool)
@@ -38,9 +48,12 @@ pub async fn counts_per_code(pool: &SqlitePool) -> Result<Vec<CodeCount>, sqlx::
 
     Ok(rows
         .into_iter()
-        .map(|r| CodeCount {
+        .map(|r| MetricSummary {
+            coding_system: r.coding_system,
             coding_code: r.coding_code,
             count: r.count,
+            first_effective_start: r.first_effective_start,
+            last_effective_start: r.last_effective_start,
         })
         .collect())
 }
@@ -48,90 +61,75 @@ pub async fn counts_per_code(pool: &SqlitePool) -> Result<Vec<CodeCount>, sqlx::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queries::test_support::{seed_observations, ObsSpec};
+    use crate::queries::test_support::{seed_interval_observations, IntervalObsSpec};
     use time::macros::datetime;
 
     #[tokio::test]
     async fn empty_vec_when_no_observations() {
-        let (pool, _) = seed_observations(&[]).await;
-        let counts = counts_per_code(&pool).await.expect("query");
-        assert!(counts.is_empty());
+        let (pool, _) = seed_interval_observations(&[]).await;
+        let metrics = counts_per_code(&pool).await.expect("query");
+        assert!(metrics.is_empty());
     }
 
     #[tokio::test]
-    async fn returns_one_row_per_distinct_code() {
-        let (pool, _) = seed_observations(&[
-            ObsSpec {
+    async fn groups_by_system_and_code_with_count_and_span() {
+        let (pool, _) = seed_interval_observations(&[
+            IntervalObsSpec {
+                coding_system: "http://loinc.org",
                 coding_code: "29463-7",
-                coding_display: Some("Body Weight"),
                 effective_start: datetime!(2026-01-01 12:00:00 UTC),
-                value_quantity: Some(72.5),
-                value_unit: Some("kg"),
+                effective_end: datetime!(2026-01-01 12:05:00 UTC),
+                value_quantity: 72.5,
             },
-            ObsSpec {
+            IntervalObsSpec {
+                coding_system: "http://loinc.org",
                 coding_code: "29463-7",
-                coding_display: Some("Body Weight"),
-                effective_start: datetime!(2026-02-01 12:00:00 UTC),
-                value_quantity: Some(72.0),
-                value_unit: Some("kg"),
+                effective_start: datetime!(2026-03-01 12:00:00 UTC),
+                effective_end: datetime!(2026-03-01 12:05:00 UTC),
+                value_quantity: 72.0,
             },
-            ObsSpec {
-                coding_code: "8302-2",
-                coding_display: Some("Body height"),
-                effective_start: datetime!(2026-01-01 12:00:00 UTC),
-                value_quantity: Some(175.0),
-                value_unit: Some("cm"),
+            IntervalObsSpec {
+                coding_system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage",
+                coding_code: "aasm-sleep-stage",
+                effective_start: datetime!(2026-02-01 00:00:00 UTC),
+                effective_end: datetime!(2026-02-01 00:05:00 UTC),
+                value_quantity: 3.0,
             },
         ])
         .await;
 
-        let counts = counts_per_code(&pool).await.expect("query");
-        assert_eq!(counts.len(), 2);
+        let metrics = counts_per_code(&pool).await.expect("query");
+        assert_eq!(metrics.len(), 2);
 
-        let weight = counts
-            .iter()
-            .find(|c| c.coding_code == "29463-7")
-            .expect("weight present");
+        // Ordered by system then code. Lexically "http://loinc.org" sorts
+        // before "https://chartpds..." (char 5 ':' (0x3A) < 's' (0x73)), so
+        // the loinc weight comes first and the aasm sleep stage second.
+        let weight = &metrics[0];
+        assert_eq!(weight.coding_system, "http://loinc.org");
+        assert_eq!(weight.coding_code, "29463-7");
         assert_eq!(weight.count, 2);
+        assert_eq!(
+            weight.first_effective_start,
+            datetime!(2026-01-01 12:00:00 UTC)
+        );
+        assert_eq!(
+            weight.last_effective_start,
+            datetime!(2026-03-01 12:00:00 UTC)
+        );
 
-        let height = counts
-            .iter()
-            .find(|c| c.coding_code == "8302-2")
-            .expect("height present");
-        assert_eq!(height.count, 1);
-    }
-
-    #[tokio::test]
-    async fn results_ordered_alphabetically_by_code() {
-        let (pool, _) = seed_observations(&[
-            ObsSpec {
-                coding_code: "z-code",
-                coding_display: None,
-                effective_start: datetime!(2026-01-01 0:00:00 UTC),
-                value_quantity: None,
-                value_unit: None,
-            },
-            ObsSpec {
-                coding_code: "a-code",
-                coding_display: None,
-                effective_start: datetime!(2026-01-01 0:00:00 UTC),
-                value_quantity: None,
-                value_unit: None,
-            },
-            ObsSpec {
-                coding_code: "m-code",
-                coding_display: None,
-                effective_start: datetime!(2026-01-01 0:00:00 UTC),
-                value_quantity: None,
-                value_unit: None,
-            },
-        ])
-        .await;
-
-        let counts = counts_per_code(&pool).await.expect("query");
-        assert_eq!(counts.len(), 3);
-        assert_eq!(counts[0].coding_code, "a-code");
-        assert_eq!(counts[1].coding_code, "m-code");
-        assert_eq!(counts[2].coding_code, "z-code");
+        assert_eq!(metrics[1].coding_code, "aasm-sleep-stage");
+        assert_eq!(
+            metrics[1].coding_system,
+            "https://chartpds.fhwang.net/coding/aasm/sleep-stage"
+        );
+        assert_eq!(metrics[1].count, 1);
+        assert_eq!(
+            metrics[1].first_effective_start,
+            datetime!(2026-02-01 00:00:00 UTC)
+        );
+        assert_eq!(
+            metrics[1].last_effective_start,
+            datetime!(2026-02-01 00:00:00 UTC)
+        );
     }
 }

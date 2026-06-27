@@ -12,7 +12,7 @@ use super::api::OuraSleepSession;
 use super::parser::{self, ParsedSleepObservation};
 use crate::archive::{Archive, BlobKey, Manifest};
 use crate::clinical::{
-    AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM, LOINC_SLEEP_DURATION, SYSTEM_LOINC,
+    AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM, LOINC_SLEEP_DURATION, LOINC_WASO, SYSTEM_LOINC,
 };
 use crate::index;
 use crate::sources;
@@ -134,6 +134,24 @@ async fn index_sleep_session(
                 effective_start: nightly.effective_start,
                 effective_end: Some(nightly.effective_end),
                 value_quantity: Some(nightly.minutes),
+                value_string: None,
+                value_unit: Some("min"),
+            },
+        )
+        .await?;
+    }
+
+    if let Some(waso) = parser::wake_after_sleep_onset(session)? {
+        index::insert_observation(
+            pool,
+            index::InsertObservationParams {
+                source_document_id,
+                coding_system: SYSTEM_LOINC,
+                coding_code: LOINC_WASO,
+                coding_display: Some("Wake after sleep onset"),
+                effective_start: waso.effective_start,
+                effective_end: Some(waso.effective_end),
+                value_quantity: Some(waso.minutes),
                 value_string: None,
                 value_unit: Some("min"),
             },
@@ -321,6 +339,44 @@ mod tests {
         assert!(observations
             .iter()
             .all(|o| o.coding_code == AASM_SLEEP_STAGE_CODE));
+    }
+
+    #[tokio::test]
+    async fn ingest_emits_waso_observation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+
+        // W W N2 N2 W N1 REM -> one interior wake epoch -> WASO 5 min.
+        let session = OuraSleepSession {
+            id: "s1".to_owned(),
+            day: "2026-01-15".to_owned(),
+            bedtime_start: "2026-01-14T22:00:00Z".to_owned(),
+            bedtime_end: "2026-01-15T06:00:00Z".to_owned(),
+            session_type: "long_sleep".to_owned(),
+            sleep_phase_5_min: "4422413".to_owned(),
+            total_sleep_duration: Some(28800),
+            rem_sleep_duration: None,
+            deep_sleep_duration: None,
+            light_sleep_duration: None,
+        };
+        let raw = serde_json::json!({ "data": [ { "id": "s1" } ] });
+
+        let doc_id = ingest_session(&archive, &pool, &session, &raw)
+            .await
+            .expect("ingest");
+
+        let obs = list_observations_by_source_document(&pool, doc_id)
+            .await
+            .expect("list");
+        let waso: Vec<_> = obs.iter().filter(|o| o.coding_code == "103215-0").collect();
+        assert_eq!(waso.len(), 1);
+        assert_eq!(waso[0].coding_system, "http://loinc.org");
+        assert_eq!(waso[0].value_quantity, Some(5.0));
+        assert_eq!(waso[0].value_unit.as_deref(), Some("min"));
     }
 
     #[tokio::test]

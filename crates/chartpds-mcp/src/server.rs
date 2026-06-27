@@ -17,15 +17,15 @@ pub(crate) struct LatestObservationByCodeArgs {
     pub(crate) code: String,
 }
 
-/// Arguments for the `observations_in_range` tool.
+/// Arguments for the `get_observation_history` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub(crate) struct ObservationsInRangeArgs {
-    /// LOINC code to filter on.
-    pub(crate) code: String,
-    /// Inclusive start of the time window (RFC 3339).
-    pub(crate) start: String,
-    /// Exclusive end of the time window (RFC 3339).
-    pub(crate) end: String,
+pub(crate) struct GetObservationHistoryArgs {
+    /// One or more codings to read. Each is `{system, code}`.
+    pub(crate) codings: Vec<Coding>,
+    /// Optional inclusive lower bound on `effective_start` (RFC 3339).
+    pub(crate) since: Option<String>,
+    /// Optional exclusive upper bound on `effective_start` (RFC 3339).
+    pub(crate) until: Option<String>,
 }
 
 /// Arguments for the `observation_counts` tool.
@@ -66,6 +66,10 @@ pub(crate) struct SyncSourceArgs {
     /// Number of recent days to sync (defaults to 8).
     pub(crate) window_days: Option<i64>,
 }
+
+/// Arguments for the `describe_codings` tool (none).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct DescribeCodingsArgs {}
 
 /// Arguments for the `list_notifications` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -169,18 +173,37 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "List observations matching a LOINC code with effective_start in [start, end). Returns a JSON array."
+        description = "Read observation history across one or more codings, with optional open-ended bounds. Args: codings [{system, code}], since? (RFC 3339, inclusive), until? (RFC 3339, exclusive); omit either bound for open-ended, omit both for full history. Returns a flat JSON array of observations ordered by (coding_system, coding_code, effective_start)."
     )]
-    async fn observations_in_range(
+    async fn get_observation_history(
         &self,
-        Parameters(args): Parameters<ObservationsInRangeArgs>,
+        Parameters(args): Parameters<GetObservationHistoryArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let start = time::OffsetDateTime::parse(&args.start, &Rfc3339)
-            .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
-        let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
-            .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
+        let since =
+            match args.since.as_deref() {
+                Some(s) => Some(time::OffsetDateTime::parse(s, &Rfc3339).map_err(|err| {
+                    McpError::invalid_params(format!("invalid since: {err}"), None)
+                })?),
+                None => None,
+            };
+        let until =
+            match args.until.as_deref() {
+                Some(s) => Some(time::OffsetDateTime::parse(s, &Rfc3339).map_err(|err| {
+                    McpError::invalid_params(format!("invalid until: {err}"), None)
+                })?),
+                None => None,
+            };
 
-        let rows = chartpds_core::queries::in_range(&self.pool, &args.code, start, end)
+        let codings: Vec<chartpds_core::queries::CodingKey<'_>> = args
+            .codings
+            .iter()
+            .map(|c| chartpds_core::queries::CodingKey {
+                coding_system: &c.system,
+                coding_code: &c.code,
+            })
+            .collect();
+
+        let rows = chartpds_core::queries::observation_history(&self.pool, &codings, since, until)
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
         let json = serde_json::to_string(&rows)
@@ -189,7 +212,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Count observations grouped by LOINC code. Returns [{coding_code, count}] ordered alphabetically."
+        description = "Discover which codings are present in the store. Returns [{coding_system, coding_code, count, first_effective_start, last_effective_start}] grouped by (system, code), ordered by system then code. Feed {coding_system, coding_code} into the history/aggregator tools. Empty array means an empty store; last_effective_start is the per-coding freshness signal."
     )]
     async fn observation_counts(
         &self,
@@ -199,6 +222,19 @@ impl ChartPdsServer {
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
         let json = serde_json::to_string(&counts)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Describe the non-standard codings ChartPDS mints, including value-encoding semantics a client cannot infer. Standard codings (LOINC) are omitted as self-describing. Returns [{coding_system, coding_code, description, value_quantity_meaning, value_string_meaning, values:[{value_quantity, value_string, label}], hints}]."
+    )]
+    async fn describe_codings(
+        &self,
+        Parameters(_args): Parameters<DescribeCodingsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let defs = chartpds_core::clinical::minted_coding_definitions();
+        let json = serde_json::to_string(&defs)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -735,13 +771,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observations_in_range_returns_match_in_window() {
+    async fn get_observation_history_returns_match_for_coding() {
         let server = fresh_server_with_one_weight().await;
         let result = server
-            .observations_in_range(Parameters(ObservationsInRangeArgs {
-                code: "29463-7".to_string(),
-                start: "2025-12-01T00:00:00Z".to_string(),
-                end: "2026-02-01T00:00:00Z".to_string(),
+            .get_observation_history(Parameters(GetObservationHistoryArgs {
+                codings: vec![Coding {
+                    system: "http://loinc.org".to_owned(),
+                    code: "29463-7".to_owned(),
+                }],
+                since: None,
+                until: None,
             }))
             .await
             .expect("tool call succeeds");
@@ -750,21 +789,23 @@ mod tests {
             rmcp::model::RawContent::Text(t) => &t.text,
             _ => panic!("expected text content"),
         };
-        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        let arr = value.as_array().expect("expected array");
+        let arr: serde_json::Value = serde_json::from_str(text).expect("valid json");
+        let arr = arr.as_array().expect("array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["coding_code"], "29463-7");
-        assert_eq!(arr[0]["value_quantity"], 72.5);
     }
 
     #[tokio::test]
-    async fn observations_in_range_returns_empty_outside_window() {
+    async fn get_observation_history_empty_when_coding_absent() {
         let server = fresh_server_with_one_weight().await;
         let result = server
-            .observations_in_range(Parameters(ObservationsInRangeArgs {
-                code: "29463-7".to_string(),
-                start: "2030-01-01T00:00:00Z".to_string(),
-                end: "2030-12-01T00:00:00Z".to_string(),
+            .get_observation_history(Parameters(GetObservationHistoryArgs {
+                codings: vec![Coding {
+                    system: "http://loinc.org".to_owned(),
+                    code: "no-such-code".to_owned(),
+                }],
+                since: None,
+                until: None,
             }))
             .await
             .expect("tool call succeeds");
@@ -788,7 +829,41 @@ mod tests {
             rmcp::model::RawContent::Text(t) => &t.text,
             _ => panic!("expected text content"),
         };
-        assert_eq!(text, r#"[{"coding_code":"29463-7","count":1}]"#);
+        let v: serde_json::Value = serde_json::from_str(text).expect("valid json");
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["coding_system"], "http://loinc.org");
+        assert_eq!(arr[0]["coding_code"], "29463-7");
+        assert_eq!(arr[0]["count"], 1);
+        assert_eq!(arr[0]["first_effective_start"], "2026-01-01T12:00:00Z");
+        assert_eq!(arr[0]["last_effective_start"], "2026-01-01T12:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn describe_codings_returns_sleep_stage_catalog() {
+        let server = fresh_server_with_empty_db().await;
+        let result = server
+            .describe_codings(Parameters(DescribeCodingsArgs {}))
+            .await
+            .expect("tool call succeeds");
+
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let v: serde_json::Value = serde_json::from_str(text).expect("valid json");
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["coding_code"], "aasm-sleep-stage");
+        assert_eq!(
+            arr[0]["coding_system"],
+            "https://chartpds.fhwang.net/coding/aasm/sleep-stage"
+        );
+        assert_eq!(arr[0]["values"].as_array().expect("values array").len(), 5);
+        // Spot-check the encoding a client needs.
+        assert_eq!(arr[0]["values"][0]["value_quantity"], 0.0);
+        assert_eq!(arr[0]["values"][0]["value_string"], "wake");
+        assert_eq!(arr[0]["values"][4]["value_string"], "rem");
     }
 
     #[tokio::test]

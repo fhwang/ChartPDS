@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT coding_system AS \"coding_system!: String\",\n               coding_code AS \"coding_code!: String\",\n               COUNT(*)    AS \"count!: i64\",\n               MIN(effective_start) AS \"first_effective_start!: OffsetDateTime\",\n               MAX(effective_start) AS \"last_effective_start!: OffsetDateTime\"\n        FROM observations\n        GROUP BY coding_system, coding_code\n        ORDER BY coding_system, coding_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "coding_system!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_code!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "first_effective_start!: OffsetDateTime",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_effective_start!: OffsetDateTime",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7a1f574345727759373a0299af6f4976f919124b21e00465479420d46606a78c"
+}
