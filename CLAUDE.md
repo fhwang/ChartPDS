@@ -369,3 +369,37 @@ Sleep data settles quickly; no stability check needed. Oura's sync uses
 Confidence functions are pure (no async, no database) and live in each
 adapter's `confidence.rs`. Shared types (`DayConfidence`, `ConfidenceByDate`),
 `enumerate_dates`, and `select_fetch_dates` live in `sources/confidence.rs`.
+
+## Holdout regression suite
+
+The `holdout/` crate is a tamper-resistant regression suite: black-box
+integration tests that drive the real `chartpds-mcp` binary over stdio and
+assert on the JSON the product tools return. It binds to the MCP tool surface,
+NOT to `chartpds-core`'s internal API, so internal refactors do not legitimately
+break it. Each test encodes a real bug we never want back. See
+`docs/superpowers/specs/2026-06-27-holdout-regression-suite-design.md`.
+
+**Three tiers of authority — treat them differently:**
+
+1. **Spec & holdout tests — read-only.** You may NOT edit anything under
+   `holdout/`, `holdout.lock`, `.github/allowed_signers`, or
+   `.github/workflows/holdout.yml`. These are protected paths.
+2. **Code (`crates/**`) — freely mutable.** Fix bugs here, fast.
+
+**Operating rules:**
+
+- **When a holdout test fails, STOP and report it. Do not touch the test.** A
+  holdout failure is a real regression; fix the code in `crates/**` so the test
+  passes. Never edit, `#[ignore]`, delete, or weaken a holdout test or its
+  fixture to get to green.
+- **Never run `just holdout-bless`.** Blessing requires a human signature
+  (Touch ID); you cannot produce one, and the CI gate will reject any unsigned
+  change to a protected path.
+- **You may draft a holdout test only when explicitly asked.** When you do,
+  write the test under `holdout/` and the fixture under `holdout/fixtures/`, run
+  it to confirm it reproduces the bug, then leave the changes
+  staged-but-uncommitted and hand off: tell the human it is "ready to bless."
+  The human runs `just holdout-bless "<why>"` to admit it via a signed commit.
+- `just check` runs the holdout tests (via `cargo test --workspace`) and the
+  `holdout-verify` lockfile check. If `holdout-verify` fails during your work,
+  you have modified a protected file — revert it; do not regenerate the lock.

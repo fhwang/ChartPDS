@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/chartpds-core",
     "crates/chartpds-mcp",
+    "holdout",
 ]
 
 [workspace.package]
