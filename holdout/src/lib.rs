@@ -28,11 +28,11 @@ use serde_json::Value;
 /// `Harness` closes the stdio transport (the server sees EOF and exits) and
 /// removes the data directory.
 pub struct Harness {
-    // Declared before `_data_dir` so it drops first: closing the stdio transport
+    // Declared before `data_dir` so it drops first: closing the stdio transport
     // lets the server exit before its data directory is removed.
     client: RunningService<RoleClient, ()>,
     // Removed on drop, once the server has exited.
-    _data_dir: TempDir,
+    data_dir: TempDir,
 }
 
 impl Harness {
@@ -64,10 +64,7 @@ impl Harness {
         let client = serve_client((), transport)
             .await
             .expect("MCP initialize handshake");
-        Self {
-            _data_dir: data_dir,
-            client,
-        }
+        Self { client, data_dir }
     }
 
     /// Call an MCP tool by name with JSON `args` and return the parsed JSON the
@@ -103,6 +100,36 @@ impl Harness {
             .unwrap_or_else(|| panic!("tool {name} returned no text content"));
         serde_json::from_str(&text)
             .unwrap_or_else(|err| panic!("tool {name} text content is not JSON: {err}"))
+    }
+
+    /// Plant every file from `fixtures/<subdir>/` into the server's archive
+    /// directory (`$CHARTPDS_DATA_DIR/archive/`), creating it if needed.
+    ///
+    /// This is the only black-box way to exercise the adapter (Fitbit/Oura)
+    /// ingest path: their live path needs network/OAuth, but pre-built archive
+    /// blobs and their `.meta.json` sidecars can be committed as fixtures,
+    /// planted here, and replayed by calling the `rebuild_index` tool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixtures directory cannot be read or a file cannot be
+    /// copied into the archive.
+    pub fn seed_archive_from_fixtures(&self, subdir: &str) {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(subdir);
+        let archive = self.data_dir.path().join("archive");
+        std::fs::create_dir_all(&archive).expect("create archive dir");
+        let entries = std::fs::read_dir(&src)
+            .unwrap_or_else(|err| panic!("read fixtures dir {}: {err}", src.display()));
+        for entry in entries {
+            let entry = entry.expect("read dir entry");
+            if entry.file_type().expect("file type").is_file() {
+                let dest = archive.join(entry.file_name());
+                std::fs::copy(entry.path(), &dest)
+                    .unwrap_or_else(|err| panic!("copy fixture {}: {err}", entry.path().display()));
+            }
+        }
     }
 
     /// Ingest an inline CCDA document via the `ingest_record` tool.

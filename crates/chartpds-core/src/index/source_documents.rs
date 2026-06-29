@@ -72,6 +72,85 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
     Ok(row.id)
 }
 
+/// Outcome of [`insert_superseding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersedeOutcome {
+    /// The incoming document was the newest pull for its `(source,
+    /// document_date)`: every prior document for that day was deleted
+    /// (cascading its observations) and this row was inserted. Carries the new
+    /// row id.
+    Inserted(i64),
+    /// A document with a strictly newer `archived_at` already exists for this
+    /// `(source, document_date)`, so the incoming (stale) document was not
+    /// inserted and the existing winner was left intact. Carries the winner's
+    /// row id.
+    Superseded(i64),
+}
+
+/// Insert a `source_documents` row, superseding prior documents for the same
+/// `(source, document_date)`.
+///
+/// Adapters that re-pull a mutable daily window (Fitbit intraday HR) archive a
+/// fresh blob each sync whose bytes differ as the day grows, so the
+/// `archive_key` UNIQUE guard never fires and naive inserts stack N full copies
+/// of the day's observations. This keeps exactly one document per `(source,
+/// document_date)`: the one with the greatest `archived_at`.
+///
+/// The newest pull wins regardless of call order — so an out-of-order archive
+/// replay (rebuild) converges on the same single document. If the incoming
+/// document is strictly older than one already stored for the day, it is
+/// skipped ([`SupersedeOutcome::Superseded`]); otherwise prior documents for
+/// the day are deleted (cascading their observations) and the incoming row is
+/// inserted ([`SupersedeOutcome::Inserted`]).
+///
+/// When `document_date` is `None` there is no day to key supersession on and
+/// this behaves like a plain [`insert`].
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if any of the underlying queries fail.
+pub async fn insert_superseding(
+    pool: &SqlitePool,
+    params: InsertParams<'_>,
+) -> Result<SupersedeOutcome, sqlx::Error> {
+    let Some(date) = params.document_date else {
+        // No day to supersede by — behave like a plain insert.
+        return Ok(SupersedeOutcome::Inserted(insert(pool, params).await?));
+    };
+
+    // Existing documents for this source + day, if any.
+    let existing = sqlx::query!(
+        r#"
+        SELECT id AS "id!: i64", archived_at AS "archived_at: OffsetDateTime"
+        FROM source_documents
+        WHERE source = ? AND document_date = ?
+        "#,
+        params.source,
+        date,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // If a strictly-newer document already exists, the incoming pull is stale.
+    if let Some(newest) = existing.iter().max_by_key(|r| r.archived_at) {
+        if newest.archived_at > params.archived_at {
+            return Ok(SupersedeOutcome::Superseded(newest.id));
+        }
+    }
+
+    // Incoming is the newest pull: drop every prior document for this day
+    // (cascading observations) and insert the fresh one.
+    sqlx::query!(
+        "DELETE FROM source_documents WHERE source = ? AND document_date = ?",
+        params.source,
+        date,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(SupersedeOutcome::Inserted(insert(pool, params).await?))
+}
+
 /// Fetch a `source_documents` row by its archive key.
 ///
 /// Returns `Ok(None)` if no row matches.
@@ -203,6 +282,82 @@ mod tests {
             .expect("fetch")
             .expect("row");
         assert_eq!(row.document_date.as_deref(), Some("2026-01-01"));
+    }
+
+    fn key_from_byte(b: u8) -> BlobKey {
+        BlobKey::from_hex_str(&format!("{:02x}{}", b, "0".repeat(62))).expect("valid key")
+    }
+
+    #[tokio::test]
+    async fn insert_superseding_keeps_only_the_newest_pull_regardless_of_order() {
+        let pool = fresh_pool().await;
+        let t1 = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("t1");
+        let t2 = OffsetDateTime::from_unix_timestamp(1_700_000_100).expect("t2");
+        let t3 = OffsetDateTime::from_unix_timestamp(1_700_000_200).expect("t3");
+
+        // Insert the middle pull (t2) first.
+        let key2 = key_from_byte(0x22);
+        let out = insert_superseding(
+            &pool,
+            InsertParams {
+                archive_key: &key2,
+                kind: "fitbit-intraday-hr-day",
+                source: "fitbit",
+                original_filename: None,
+                archived_at: t2,
+                document_date: Some("2026-01-01"),
+            },
+        )
+        .await
+        .expect("insert t2");
+        assert!(matches!(out, SupersedeOutcome::Inserted(_)));
+
+        // An older pull (t1) arrives out of order: it must be superseded, not stored.
+        let key1 = key_from_byte(0x11);
+        let out = insert_superseding(
+            &pool,
+            InsertParams {
+                archive_key: &key1,
+                kind: "fitbit-intraday-hr-day",
+                source: "fitbit",
+                original_filename: None,
+                archived_at: t1,
+                document_date: Some("2026-01-01"),
+            },
+        )
+        .await
+        .expect("insert t1");
+        assert!(
+            matches!(out, SupersedeOutcome::Superseded(_)),
+            "an older pull must be superseded by the newer stored document"
+        );
+
+        // The newest pull (t3) wins and clears the rest.
+        let key3 = key_from_byte(0x33);
+        let out = insert_superseding(
+            &pool,
+            InsertParams {
+                archive_key: &key3,
+                kind: "fitbit-intraday-hr-day",
+                source: "fitbit",
+                original_filename: None,
+                archived_at: t3,
+                document_date: Some("2026-01-01"),
+            },
+        )
+        .await
+        .expect("insert t3");
+        assert!(matches!(out, SupersedeOutcome::Inserted(_)));
+
+        // Exactly one document remains for the day, and it is the t3 pull.
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT archive_key FROM source_documents WHERE source = 'fitbit' AND document_date = '2026-01-01'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("fetch survivors");
+        assert_eq!(rows.len(), 1, "only one document should survive per day");
+        assert_eq!(rows[0].0, key3.as_str());
     }
 
     #[tokio::test]

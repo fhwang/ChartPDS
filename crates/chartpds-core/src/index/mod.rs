@@ -50,7 +50,8 @@ pub use source_day_state::{
 };
 pub use source_documents::{
     fetch_by_archive_key as fetch_source_document_by_archive_key, insert as insert_source_document,
-    InsertParams as InsertSourceDocumentParams, SourceDocument,
+    insert_superseding as insert_source_document_superseding,
+    InsertParams as InsertSourceDocumentParams, SourceDocument, SupersedeOutcome,
 };
 pub use source_state::{
     get as get_source_state, upsert as upsert_source_state, SourceState,

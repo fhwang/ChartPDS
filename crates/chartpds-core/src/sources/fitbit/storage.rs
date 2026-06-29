@@ -124,7 +124,12 @@ async fn index_intraday_day(
     archived_at: OffsetDateTime,
     original_filename: &str,
 ) -> sources::Result<i64> {
-    let source_document_id = index::insert_source_document(
+    // Supersede any prior pull for this day. Each Fitbit sync archives a fresh
+    // blob whose bytes differ as the day grows, so the `archive_key` UNIQUE
+    // guard never catches the overlap; without superseding, every re-pull would
+    // stack another full copy of the day's observations (cross-document
+    // duplication). Exactly one document per day survives — the newest pull.
+    let source_document_id = match index::insert_source_document_superseding(
         pool,
         index::InsertSourceDocumentParams {
             archive_key,
@@ -135,7 +140,13 @@ async fn index_intraday_day(
             document_date: Some(date),
         },
     )
-    .await?;
+    .await?
+    {
+        index::SupersedeOutcome::Inserted(id) => id,
+        // A newer pull for this day already exists (an out-of-order archive
+        // replay). Leave it and its observations / day-state untouched.
+        index::SupersedeOutcome::Superseded(existing_id) => return Ok(existing_id),
+    };
 
     let observations = parser::parse_intraday_day(result)?;
 
@@ -252,5 +263,81 @@ mod tests {
         assert_eq!(observations[0].coding_code, "8867-4");
         assert_eq!(observations[0].value_quantity, Some(72.0));
         assert_eq!(observations[0].value_unit.as_deref(), Some("/min"));
+    }
+
+    #[tokio::test]
+    async fn reingesting_a_day_supersedes_the_prior_pull() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+
+        // First pull for the day: two samples.
+        let pull1 = IntradayResult {
+            samples: vec![
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:00.000Z".to_owned(),
+                    beats_per_minute: 72,
+                },
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:02.000Z".to_owned(),
+                    beats_per_minute: 75,
+                },
+            ],
+            raw_pages: vec![serde_json::json!({"dataPoints": [{"a": 1}, {"a": 2}]})],
+        };
+        ingest_day(&archive, &pool, "2026-01-01", &pull1)
+            .await
+            .expect("ingest pull1");
+
+        // Second pull for the same day: intraday HR has grown to three samples.
+        // Different bytes => different archive_key, so the archive_key UNIQUE
+        // guard does not catch the overlap. The newer pull must supersede the
+        // prior document, not stack a second full copy on top of it.
+        let pull2 = IntradayResult {
+            samples: vec![
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:00.000Z".to_owned(),
+                    beats_per_minute: 72,
+                },
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:02.000Z".to_owned(),
+                    beats_per_minute: 75,
+                },
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:04.000Z".to_owned(),
+                    beats_per_minute: 80,
+                },
+            ],
+            raw_pages: vec![serde_json::json!({"dataPoints": [{"a": 1}, {"a": 2}, {"a": 3}]})],
+        };
+        ingest_day(&archive, &pool, "2026-01-01", &pull2)
+            .await
+            .expect("ingest pull2");
+
+        // Only the latest pull's observations survive: 3, not 5.
+        let obs_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM observations WHERE coding_code = '8867-4'")
+                .fetch_one(&pool)
+                .await
+                .expect("count observations");
+        assert_eq!(
+            obs_count.0, 3,
+            "a re-pulled day must replace, not duplicate, its observations"
+        );
+
+        // And exactly one source_document remains for that day.
+        let doc_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM source_documents WHERE source = 'fitbit' AND document_date = '2026-01-01'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count docs");
+        assert_eq!(
+            doc_count.0, 1,
+            "a re-pulled day must leave exactly one source document"
+        );
     }
 }
