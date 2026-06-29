@@ -1,0 +1,34 @@
+name: Holdout
+
+# The holdout gate. Runs on every PR and must be a required status check in
+# branch protection so a PR cannot merge while it is red. Two independent
+# checks, neither of which a coding agent can turn green:
+#   1. holdout.lock matches the holdout/ tree (no protected file silently
+#      added, removed, or weakened).
+#   2. Every PR commit touching a protected path is signed by an allowed key
+#      (a human bless). The agent cannot sign, so it cannot bless.
+on:
+  pull_request:
+
+concurrency:
+  group: holdout-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history so we can walk the PR's commit range (base..head) and
+      # verify per-commit signatures.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify holdout.lock matches holdout/
+        run: ./scripts/holdout-verify.sh
+
+      - name: Verify protected-path commits are human-signed
+        run: |
+          ./scripts/holdout-verify-signatures.sh \
+            "origin/${{ github.base_ref }}" \
+            "${{ github.event.pull_request.head.sha }}"
