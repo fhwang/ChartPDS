@@ -1,0 +1,23 @@
+# Allowed signers for ChartPDS holdout "bless" commits.
+#
+# Any commit that touches a protected holdout path (holdout/**, holdout.lock,
+# this file, or .github/workflows/holdout.yml) must be SSH-signed by a key
+# listed below, or the Holdout CI check fails. This is what makes the holdout
+# suite tamper-resistant against a coding agent: the agent cannot produce a
+# signature from a Secure-Enclave / Touch-ID-gated key.
+#
+# Format (one signer per line):
+#   <committer-email> namespaces="git" <key-type> <public-key>
+#
+# One-time setup (see docs/superpowers/specs/2026-06-27-holdout-regression-suite-design.md):
+#   1. Create a Secure-Enclave SSH signing key gated by Touch ID, e.g. via
+#      `secretive`, or `ssh-keygen -t ecdsa-sk` with a hardware authenticator.
+#   2. Configure git to sign with it:
+#        git config gpg.format ssh
+#        git config user.signingkey <path-or-"key::..."-to-public-key>
+#   3. Replace the placeholder line below with that public key.
+#   4. Register the same public key as a *signing* key on your GitHub account
+#      (Settings -> SSH and GPG keys -> New SSH key -> Key type: Signing Key)
+#      so GitHub shows blessed commits as "Verified".
+#
+sera@fhwang.net namespaces="git" ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBI1XeOPh6zHPRRe9iOxQ7YeRFX6FertRMBazoeHekGI3SnCFcg+KqeFj903LY9+k931blhpZ3AqvyZBYjdJ3TmI= chartpds-holdout-bless@secretive.Francis’s-MacBook-Pro-(2).local

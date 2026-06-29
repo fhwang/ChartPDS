@@ -4,9 +4,10 @@
 default:
     @just --list
 
-# Run the full check pipeline (format, lint, type-check, test, deny, machete,
-# and verify the sqlx offline cache is in sync with the current migrations).
-check: _verify-tools _check-sql fmt-check lint typecheck test deny machete
+# Run the full check pipeline (format, lint, type-check, test, holdout lockfile
+# verify, deny, machete, and verify the sqlx offline cache is in sync with the
+# current migrations).
+check: _verify-tools _check-sql fmt-check lint typecheck test holdout-verify deny machete
 
 # Verify the .sqlx/ offline cache matches the current schema + queries. Drops
 # and rebuilds a temporary SQLite from migrations, then `cargo sqlx prepare
@@ -44,8 +45,13 @@ lint:
 typecheck:
     cargo check --workspace --all-targets
 
-# Run the test suite.
+# Run the test suite. Build the chartpds-mcp binary first: the holdout suite
+# spawns it as a child process and locates it at target/<profile>/chartpds-mcp.
+# A bare `cargo test --workspace` does not emit that standalone artifact for a
+# sibling crate's tests, so the holdout harness would not find it on a clean
+# build (e.g. in CI). Building it explicitly makes the suite hermetic.
 test:
+    cargo build -p chartpds-mcp
     cargo test --workspace
 
 # Build the workspace.
@@ -78,3 +84,19 @@ prepare-sql:
         cargo sqlx migrate run --source crates/chartpds-core/migrations
     DATABASE_URL=sqlite://target/sqlx/build.db?mode=rwc \
         cargo sqlx prepare --workspace -- --all-targets
+
+# Verify the holdout suite has not drifted from its lockfile. Part of `check`.
+# This is the content half of the holdout gate; CI additionally enforces that
+# protected-path changes are human-signed (see scripts/holdout-verify-signatures.sh).
+holdout-verify:
+    ./scripts/holdout-verify.sh
+
+# Bless a deliberate change to the holdout suite: regenerate holdout.lock from
+# the current holdout/ tree and commit it together with the holdout changes in a
+# SIGNED commit. Only a human with the Touch-ID/Secure-Enclave signing key can
+# complete the commit, which is exactly what gates the protected paths. Usage:
+#   just holdout-bless "bless: add diabetes problem-list regression"
+holdout-bless message:
+    ./scripts/holdout-hashes.sh > holdout.lock
+    git add holdout holdout.lock .github/allowed_signers .github/workflows/holdout.yml
+    git commit -S -m "{{message}}"
