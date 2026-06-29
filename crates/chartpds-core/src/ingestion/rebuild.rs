@@ -318,6 +318,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_collapses_duplicate_fitbit_days_to_the_newest_pull() {
+        use crate::sources::fitbit;
+        use crate::sources::fitbit::api::{HeartRateSample, IntradayResult};
+
+        let (pool, archive) = fresh_pool_and_archive().await;
+
+        // Two overlapping pulls of the SAME day land as two distinct archive
+        // blobs (different bytes => different content hash). This is the
+        // production scenario: many retried/grown syncs archived a fresh blob
+        // for an overlapping window.
+        // raw_pages must be valid Fitbit pages: rebuild's replay re-derives the
+        // samples FROM the archived raw_pages (it never sees the live `samples`).
+        let pull1 = IntradayResult {
+            samples: vec![HeartRateSample {
+                physical_time: "2026-01-01T08:00:00.000Z".to_owned(),
+                beats_per_minute: 72,
+            }],
+            raw_pages: vec![serde_json::json!({
+                "dataPoints": [
+                    {"heartRate": {"sampleTime": {"physicalTime": "2026-01-01T08:00:00.000Z"}, "beatsPerMinute": 72}}
+                ]
+            })],
+        };
+        fitbit::storage::ingest_day(&archive, &pool, "2026-01-01", &pull1)
+            .await
+            .expect("ingest pull1");
+
+        let pull2 = IntradayResult {
+            samples: vec![
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:00.000Z".to_owned(),
+                    beats_per_minute: 72,
+                },
+                HeartRateSample {
+                    physical_time: "2026-01-01T08:00:02.000Z".to_owned(),
+                    beats_per_minute: 75,
+                },
+            ],
+            raw_pages: vec![serde_json::json!({
+                "dataPoints": [
+                    {"heartRate": {"sampleTime": {"physicalTime": "2026-01-01T08:00:00.000Z"}, "beatsPerMinute": 72}},
+                    {"heartRate": {"sampleTime": {"physicalTime": "2026-01-01T08:00:02.000Z"}, "beatsPerMinute": 75}}
+                ]
+            })],
+        };
+        fitbit::storage::ingest_day(&archive, &pool, "2026-01-01", &pull2)
+            .await
+            .expect("ingest pull2");
+
+        // Both blobs are durably in the archive even though the index already
+        // holds only the newest.
+        assert_eq!(archive.list_keys().await.expect("keys").len(), 2);
+
+        // Rebuild clears the index and replays both blobs. Supersession must
+        // collapse them back to one document — the newest pull (two samples).
+        let result = rebuild_index(&archive, &pool).await.expect("rebuild");
+        assert_eq!(result.blobs_found, 2);
+        assert_eq!(result.fitbit_ingested, 2);
+
+        let doc_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM source_documents WHERE source = 'fitbit' AND document_date = '2026-01-01'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count docs");
+        assert_eq!(
+            doc_count.0, 1,
+            "duplicate day must collapse to one document"
+        );
+
+        let obs_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM observations WHERE coding_code = '8867-4'")
+                .fetch_one(&pool)
+                .await
+                .expect("count obs");
+        assert_eq!(
+            obs_count.0, 2,
+            "only the newest pull's observations survive"
+        );
+    }
+
+    #[tokio::test]
     async fn rebuild_skips_manifest_less_non_ccda_blob() {
         let (pool, archive) = fresh_pool_and_archive().await;
 

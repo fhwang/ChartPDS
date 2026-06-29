@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM source_documents WHERE source = ? AND document_date = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6c6b1b9554dcc30e60031e26f8332010366906f802c92341e4905c5d54d294ec"
+}
