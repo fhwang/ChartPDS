@@ -23,7 +23,8 @@ const REFIRE_CADENCE_HOURS: i64 = 24;
 /// Swallows per-condition errors (logs a warning) so that one failed
 /// condition does not block the others.
 pub async fn evaluate_and_dispatch(pool: &SqlitePool, input: &ConditionsInput) {
-    for eval in evaluate_all(input) {
+    let now = OffsetDateTime::now_utc();
+    for eval in evaluate_all(input, now) {
         if let Err(err) = maybe_fire(pool, &eval).await {
             tracing::warn!(
                 %err,
@@ -129,6 +130,7 @@ mod tests {
                 display_name: "Fitbit".to_owned(),
                 auth_failed: true,
                 consecutive_failures: 0,
+                frontier_last_advanced_at: None,
             }],
         }
     }
@@ -140,6 +142,7 @@ mod tests {
                 display_name: "Fitbit".to_owned(),
                 auth_failed: false,
                 consecutive_failures: 0,
+                frontier_last_advanced_at: None,
             }],
         }
     }
@@ -187,5 +190,31 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn frontier_stuck_fires_and_logs() {
+        let pool = fresh_pool().await;
+        let input = ConditionsInput {
+            adapters: vec![AdapterConditionState {
+                adapter_name: "fitbit".to_owned(),
+                display_name: "Fitbit".to_owned(),
+                auth_failed: false,
+                consecutive_failures: 0,
+                // Far in the past, so it is always >= 48h stale vs. real now().
+                frontier_last_advanced_at: Some(
+                    OffsetDateTime::parse("2020-01-01T00:00:00Z", &Rfc3339)
+                        .expect("valid timestamp"),
+                ),
+            }],
+        };
+        evaluate_and_dispatch(&pool, &input).await;
+
+        let entries = index::list_recent_notification_log(&pool, 10)
+            .await
+            .expect("list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].condition_id, "frontier_stuck:fitbit");
+        assert_eq!(entries[0].severity, "warning");
     }
 }

@@ -58,7 +58,23 @@ async fn adapter_condition(pool: &SqlitePool, source: &dyn SourceMeta) -> Adapte
             .as_ref()
             .is_some_and(|s| s.last_error_reason.as_deref() == Some("reauth_required")),
         consecutive_failures: state.as_ref().map_or(0, |s| s.consecutive_sync_failures),
+        frontier_last_advanced_at: parse_frontier_advanced(
+            state
+                .as_ref()
+                .and_then(|s| s.frontier_last_advanced_at.as_deref()),
+        ),
     }
+}
+
+/// Parse a stored RFC3339 `frontier_last_advanced_at` string into an
+/// `OffsetDateTime`.
+///
+/// Returns `None` when absent or unparseable, so the `frontier_stuck` condition
+/// never fires on a source with no valid frontier timestamp.
+fn parse_frontier_advanced(raw: Option<&str>) -> Option<time::OffsetDateTime> {
+    raw.and_then(|s| {
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+    })
 }
 
 /// Minimal trait object for reading source metadata without `async`.
@@ -427,5 +443,12 @@ mod tests {
 
         assert_eq!(state2.consecutive_sync_failures, 2);
         assert_eq!(state2.last_error_reason.as_deref(), Some("transient"));
+    }
+
+    #[test]
+    fn parse_frontier_advanced_handles_valid_absent_and_invalid() {
+        assert!(super::parse_frontier_advanced(Some("2026-01-15T10:00:00Z")).is_some());
+        assert!(super::parse_frontier_advanced(None).is_none());
+        assert!(super::parse_frontier_advanced(Some("not-a-timestamp")).is_none());
     }
 }
