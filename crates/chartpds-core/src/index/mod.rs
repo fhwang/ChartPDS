@@ -54,6 +54,8 @@ pub use source_documents::{
     InsertParams as InsertSourceDocumentParams, SourceDocument, SupersedeOutcome,
 };
 pub use source_state::{
-    get as get_source_state, upsert as upsert_source_state, SourceState,
+    get as get_source_state, upsert as upsert_source_state,
+    upsert_sync_status as upsert_source_sync_status, SourceState,
     UpsertParams as UpsertSourceStateParams,
+    UpsertSyncStatusParams as UpsertSourceSyncStatusParams,
 };

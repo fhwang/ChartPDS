@@ -96,6 +96,9 @@ pub async fn sync_recent_days(
     let freshness_frontier = source_state
         .as_ref()
         .and_then(|s| s.freshness_frontier_at.clone());
+    let previous_advanced_at = source_state
+        .as_ref()
+        .and_then(|s| s.frontier_last_advanced_at.clone());
 
     // 6. Fetch + ingest each day, skipping confirmed days.
     let mut days_synced: i64 = 0;
@@ -146,11 +149,18 @@ pub async fn sync_recent_days(
     // 7. Update source_state.
     // Compute new freshness frontier: if we ingested anything, use the max
     // effective_start seen; otherwise preserve the existing frontier.
-    let new_frontier = max_effective_start.or(freshness_frontier);
+    let new_frontier = max_effective_start.or_else(|| freshness_frontier.clone());
 
     let sync_at = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    // Stamp the advance timestamp only when the frontier value actually moved.
+    let frontier_last_advanced_at = sources::confidence::frontier_advanced_at(
+        freshness_frontier.as_deref(),
+        new_frontier.as_deref(),
+        previous_advanced_at.as_deref(),
+        &sync_at,
+    );
     index::upsert_source_state(
         pool,
         index::UpsertSourceStateParams {
@@ -161,7 +171,7 @@ pub async fn sync_recent_days(
             last_error_reason: None,
             last_synced_window_end: dates.first().map(String::as_str),
             freshness_frontier_at: new_frontier.as_deref(),
-            successful_ticks_since_frontier_advance: 0,
+            frontier_last_advanced_at: frontier_last_advanced_at.as_deref(),
             consecutive_sync_failures: 0,
         },
     )

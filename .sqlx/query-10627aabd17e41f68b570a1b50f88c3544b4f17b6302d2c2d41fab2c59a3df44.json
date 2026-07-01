@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO source_state (\n            source_name, last_sync_at, last_sync_status,\n            last_error_message, last_error_reason,\n            last_synced_window_end, freshness_frontier_at,\n            frontier_last_advanced_at, consecutive_sync_failures\n        )\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(source_name) DO UPDATE SET\n            last_sync_at = excluded.last_sync_at,\n            last_sync_status = excluded.last_sync_status,\n            last_error_message = excluded.last_error_message,\n            last_error_reason = excluded.last_error_reason,\n            last_synced_window_end = excluded.last_synced_window_end,\n            freshness_frontier_at = excluded.freshness_frontier_at,\n            frontier_last_advanced_at = excluded.frontier_last_advanced_at,\n            consecutive_sync_failures = excluded.consecutive_sync_failures\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "10627aabd17e41f68b570a1b50f88c3544b4f17b6302d2c2d41fab2c59a3df44"
+}

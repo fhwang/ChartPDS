@@ -110,17 +110,16 @@ pub async fn run_tick(deps: &TickDeps) {
 /// to 0, and updates `last_sync_at`.
 pub(crate) async fn record_sync_success(pool: &SqlitePool, source_name: &str) {
     let now = now_rfc3339();
-    if let Err(err) = index::upsert_source_state(
+    // Status-only write: the frontier and window fields are owned by the
+    // adapter's sync() and must not be clobbered here.
+    if let Err(err) = index::upsert_source_sync_status(
         pool,
-        index::UpsertSourceStateParams {
+        index::UpsertSourceSyncStatusParams {
             source_name,
             last_sync_at: Some(&now),
             last_sync_status: Some("success"),
             last_error_message: None,
             last_error_reason: None,
-            last_synced_window_end: None,
-            freshness_frontier_at: None,
-            successful_ticks_since_frontier_advance: 0,
             consecutive_sync_failures: 0,
         },
     )
@@ -153,17 +152,15 @@ pub(crate) async fn record_sync_error(pool: &SqlitePool, source_name: &str, err:
         }
     };
 
-    if let Err(db_err) = index::upsert_source_state(
+    // Status-only write: preserve the adapter-owned frontier/window fields.
+    if let Err(db_err) = index::upsert_source_sync_status(
         pool,
-        index::UpsertSourceStateParams {
+        index::UpsertSourceSyncStatusParams {
             source_name,
             last_sync_at: Some(&now),
             last_sync_status: Some("error"),
             last_error_message: Some(&error_message),
             last_error_reason: Some(error_reason),
-            last_synced_window_end: None,
-            freshness_frontier_at: None,
-            successful_ticks_since_frontier_advance: 0,
             consecutive_sync_failures: current_failures + 1,
         },
     )
@@ -218,7 +215,7 @@ mod tests {
                 last_error_reason: Some("transient"),
                 last_synced_window_end: None,
                 freshness_frontier_at: None,
-                successful_ticks_since_frontier_advance: 0,
+                frontier_last_advanced_at: None,
                 consecutive_sync_failures: 3,
             },
         )
@@ -235,6 +232,162 @@ mod tests {
         assert_eq!(state.last_sync_status.as_deref(), Some("success"));
         assert_eq!(state.consecutive_sync_failures, 0);
         assert!(state.last_sync_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn record_sync_success_preserves_adapter_owned_frontier() {
+        let pool = fresh_pool().await;
+
+        // The adapter writes its full state during sync(), including the
+        // freshness frontier it just computed.
+        index::upsert_source_state(
+            &pool,
+            index::UpsertSourceStateParams {
+                source_name: "fitbit",
+                last_sync_at: Some("2026-01-15T10:00:00Z"),
+                last_sync_status: Some("ok"),
+                last_error_message: None,
+                last_error_reason: None,
+                last_synced_window_end: Some("2026-01-15"),
+                freshness_frontier_at: Some("2026-01-14T00:00:00Z"),
+                frontier_last_advanced_at: Some("2026-01-15T10:00:00Z"),
+                consecutive_sync_failures: 0,
+            },
+        )
+        .await
+        .expect("adapter upsert");
+
+        // The daemon tick then records the sync status. It must NOT clobber the
+        // frontier (or window) the adapter just wrote.
+        record_sync_success(&pool, "fitbit").await;
+
+        let state = index::get_source_state(&pool, "fitbit")
+            .await
+            .expect("get succeeds")
+            .expect("row exists");
+
+        assert_eq!(state.last_sync_status.as_deref(), Some("success"));
+        assert_eq!(
+            state.freshness_frontier_at.as_deref(),
+            Some("2026-01-14T00:00:00Z"),
+            "tick status write must preserve the adapter-owned frontier"
+        );
+        assert_eq!(
+            state.frontier_last_advanced_at.as_deref(),
+            Some("2026-01-15T10:00:00Z"),
+            "tick status write must preserve frontier_last_advanced_at"
+        );
+        assert_eq!(
+            state.last_synced_window_end.as_deref(),
+            Some("2026-01-15"),
+            "tick status write must preserve the adapter-owned window end"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_sync_error_preserves_adapter_owned_frontier() {
+        let pool = fresh_pool().await;
+
+        index::upsert_source_state(
+            &pool,
+            index::UpsertSourceStateParams {
+                source_name: "fitbit",
+                last_sync_at: Some("2026-01-15T10:00:00Z"),
+                last_sync_status: Some("ok"),
+                last_error_message: None,
+                last_error_reason: None,
+                last_synced_window_end: Some("2026-01-15"),
+                freshness_frontier_at: Some("2026-01-14T00:00:00Z"),
+                frontier_last_advanced_at: Some("2026-01-15T10:00:00Z"),
+                consecutive_sync_failures: 0,
+            },
+        )
+        .await
+        .expect("adapter upsert");
+
+        let err = sources::Error::Transient {
+            reason: "network timeout".to_owned(),
+        };
+        record_sync_error(&pool, "fitbit", &err).await;
+
+        let state = index::get_source_state(&pool, "fitbit")
+            .await
+            .expect("get succeeds")
+            .expect("row exists");
+
+        assert_eq!(state.last_sync_status.as_deref(), Some("error"));
+        assert_eq!(state.consecutive_sync_failures, 1);
+        assert_eq!(
+            state.freshness_frontier_at.as_deref(),
+            Some("2026-01-14T00:00:00Z"),
+            "a failed tick must not wipe the last-known frontier"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_frontier_drives_fitbit_confidence_to_confirmed() {
+        use crate::sources::confidence::DayConfidence;
+        use crate::sources::fitbit::confidence::fitbit_day_confidence;
+
+        let pool = fresh_pool().await;
+
+        // The adapter's sync() advanced the frontier and wrote it (past
+        // 2026-01-10 + 36h buffer).
+        index::upsert_source_state(
+            &pool,
+            index::UpsertSourceStateParams {
+                source_name: "fitbit",
+                last_sync_at: Some("2026-01-20T10:00:00Z"),
+                last_sync_status: Some("ok"),
+                last_error_message: None,
+                last_error_reason: None,
+                last_synced_window_end: Some("2026-01-20"),
+                freshness_frontier_at: Some("2026-01-12T12:00:00Z"),
+                frontier_last_advanced_at: Some("2026-01-20T10:00:00Z"),
+                consecutive_sync_failures: 0,
+            },
+        )
+        .await
+        .expect("adapter upsert");
+
+        // The daemon tick records the status afterward — this used to wipe the
+        // frontier, keeping fitbit_day_confidence permanently Provisional.
+        record_sync_success(&pool, "fitbit").await;
+
+        // A stable, old day: two pulls returned the same sample count.
+        index::upsert_source_day_state(
+            &pool,
+            index::UpsertSourceDayStateParams {
+                source_name: "fitbit",
+                date: "2026-01-10",
+                samples_count: 100,
+                samples_count_prev: Some(100),
+                last_pulled_at: "2026-01-11T00:00:00Z",
+            },
+        )
+        .await
+        .expect("day state upsert");
+
+        // Read the confidence inputs back from the store, as sync does.
+        let state = index::get_source_state(&pool, "fitbit")
+            .await
+            .expect("get succeeds")
+            .expect("row exists");
+        let day_state = index::get_source_day_state(&pool, "fitbit", "2026-01-10")
+            .await
+            .expect("get succeeds");
+
+        let confidence = fitbit_day_confidence(
+            "2026-01-20",
+            "2026-01-10",
+            state.freshness_frontier_at.as_deref(),
+            day_state.as_ref(),
+        );
+        assert_eq!(
+            confidence,
+            DayConfidence::Confirmed,
+            "a persisted frontier must let an old, stable day reach Confirmed end-to-end"
+        );
     }
 
     #[tokio::test]

@@ -99,15 +99,29 @@ pub async fn sync_recent_days(
     );
     let needed_set: HashSet<&str> = needed.iter().map(String::as_str).collect();
 
-    // Load existing freshness frontier for preservation.
+    // Load existing freshness frontier (and its advance timestamp) for
+    // preservation.
     let source_state = index::get_source_state(pool, "oura").await.ok().flatten();
     let existing_frontier = source_state
         .as_ref()
         .and_then(|s| s.freshness_frontier_at.clone());
+    let existing_advanced_at = source_state
+        .as_ref()
+        .and_then(|s| s.frontier_last_advanced_at.clone());
 
-    // 2. If nothing needs fetching, skip the API call.
+    // 2. If nothing needs fetching, skip the API call. The frontier is
+    // unchanged, so its advance timestamp is preserved as-is.
     if needed.is_empty() {
-        return finish_sync(pool, &end_date, existing_frontier.as_deref(), 0, 0).await;
+        return finish_sync(
+            pool,
+            &end_date,
+            existing_frontier.as_deref(),
+            existing_frontier.as_deref(),
+            existing_advanced_at.as_deref(),
+            0,
+            0,
+        )
+        .await;
     }
 
     // 3. Fetch the range spanning the needed days.
@@ -157,11 +171,13 @@ pub async fn sync_recent_days(
     }
 
     // 5. Update source_state with freshness frontier.
-    let new_frontier = max_bedtime_end.or(existing_frontier);
+    let new_frontier = max_bedtime_end.or_else(|| existing_frontier.clone());
     finish_sync(
         pool,
         &end_date,
         new_frontier.as_deref(),
+        existing_frontier.as_deref(),
+        existing_advanced_at.as_deref(),
         days_synced,
         total_samples,
     )
@@ -169,16 +185,28 @@ pub async fn sync_recent_days(
 }
 
 /// Record the sync result in `source_state`.
+///
+/// `previous_frontier` and `previous_advanced_at` are the values already stored;
+/// `frontier_last_advanced_at` is re-stamped to now only when the frontier value
+/// changed (see [`sources::confidence::frontier_advanced_at`]).
 async fn finish_sync(
     pool: &SqlitePool,
     end_date: &str,
     freshness_frontier: Option<&str>,
+    previous_frontier: Option<&str>,
+    previous_advanced_at: Option<&str>,
     days_synced: i64,
     total_samples: i64,
 ) -> sources::Result<SyncResult> {
     let sync_at = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    let frontier_last_advanced_at = sources::confidence::frontier_advanced_at(
+        previous_frontier,
+        freshness_frontier,
+        previous_advanced_at,
+        &sync_at,
+    );
     index::upsert_source_state(
         pool,
         index::UpsertSourceStateParams {
@@ -189,7 +217,7 @@ async fn finish_sync(
             last_error_reason: None,
             last_synced_window_end: Some(end_date),
             freshness_frontier_at: freshness_frontier,
-            successful_ticks_since_frontier_advance: 0,
+            frontier_last_advanced_at: frontier_last_advanced_at.as_deref(),
             consecutive_sync_failures: 0,
         },
     )

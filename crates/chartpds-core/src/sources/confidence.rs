@@ -81,9 +81,72 @@ where
         .collect()
 }
 
+/// Compute the `frontier_last_advanced_at` timestamp for a sync write.
+///
+/// The frontier "advances" whenever its value changes (it only ever moves
+/// forward, since it is a running maximum). When it advances, stamp `now`;
+/// otherwise preserve the previously recorded advance timestamp. This gives a
+/// wall-clock signal of how long the frontier has been stuck — robust to the
+/// daemon's tick cadence and independent of tick counting.
+#[must_use]
+pub(crate) fn frontier_advanced_at(
+    previous_frontier: Option<&str>,
+    new_frontier: Option<&str>,
+    previous_advanced_at: Option<&str>,
+    now: &str,
+) -> Option<String> {
+    if new_frontier == previous_frontier {
+        previous_advanced_at.map(ToOwned::to_owned)
+    } else {
+        Some(now.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontier_advanced_first_time_stamps_now() {
+        // No prior frontier → any new frontier is an advance.
+        let stamped = frontier_advanced_at(
+            None,
+            Some("2026-01-14T00:00:00Z"),
+            None,
+            "2026-01-15T10:00:00Z",
+        );
+        assert_eq!(stamped.as_deref(), Some("2026-01-15T10:00:00Z"));
+    }
+
+    #[test]
+    fn frontier_advanced_when_value_changes_stamps_now() {
+        let stamped = frontier_advanced_at(
+            Some("2026-01-14T00:00:00Z"),
+            Some("2026-01-15T00:00:00Z"),
+            Some("2026-01-14T09:00:00Z"),
+            "2026-01-15T10:00:00Z",
+        );
+        assert_eq!(stamped.as_deref(), Some("2026-01-15T10:00:00Z"));
+    }
+
+    #[test]
+    fn frontier_unchanged_preserves_previous_advanced_at() {
+        // Frontier did not move → keep the old advanced-at timestamp, do not
+        // re-stamp to now.
+        let stamped = frontier_advanced_at(
+            Some("2026-01-14T00:00:00Z"),
+            Some("2026-01-14T00:00:00Z"),
+            Some("2026-01-14T09:00:00Z"),
+            "2026-01-15T10:00:00Z",
+        );
+        assert_eq!(stamped.as_deref(), Some("2026-01-14T09:00:00Z"));
+    }
+
+    #[test]
+    fn frontier_both_none_preserves_previous_advanced_at() {
+        let stamped = frontier_advanced_at(None, None, None, "2026-01-15T10:00:00Z");
+        assert_eq!(stamped, None);
+    }
 
     #[test]
     fn enumerate_dates_multi_day_range() {
