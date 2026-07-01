@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use crate::index::{get_source_day_state, get_source_state};
+use crate::index::{
+    get_source_day_state, get_source_document_by_id, get_source_state, Observation,
+};
 use crate::sources::fitbit::confidence::fitbit_day_confidence;
 use crate::sources::oura::confidence::oura_day_confidence;
 use crate::sources::DayConfidence;
@@ -70,12 +72,148 @@ pub async fn resolve_source_day_confidence(
     Ok(out)
 }
 
+/// An observation paired with its day's confidence, serialized flat.
+///
+/// `#[serde(flatten)]` keeps every existing `Observation` field at the top
+/// level and adds `confidence` as a sibling key, so the JSON stays additive.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ObservationWithConfidence {
+    /// The underlying observation.
+    #[serde(flatten)]
+    pub observation: Observation,
+    /// Confidence of the observation's source-day.
+    pub confidence: DayConfidence,
+}
+
+/// Confidence for a document's `(source, document_date)`, applying policy:
+/// a missing replay day or a non-wearable source is `Confirmed`.
+fn confidence_for_doc(
+    source: &str,
+    document_date: Option<&str>,
+    resolved: &HashMap<(String, String), DayConfidence>,
+) -> DayConfidence {
+    match document_date {
+        Some(date) if source == "fitbit" || source == "oura" => resolved
+            .get(&(source.to_owned(), date.to_owned()))
+            .copied()
+            .unwrap_or(DayConfidence::Confirmed),
+        _ => DayConfidence::Confirmed,
+    }
+}
+
+/// Collect the distinct wearable `(source, replay-day)` keys from a set of
+/// `(source, document_date)` pairs (skipping `None` dates and non-wearables).
+fn wearable_keys<'a, I>(pairs: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
+{
+    let mut keys: Vec<(String, String)> = pairs
+        .into_iter()
+        .filter_map(|(source, date)| match date {
+            Some(d) if source == "fitbit" || source == "oura" => {
+                Some((source.to_owned(), d.to_owned()))
+            }
+            _ => None,
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Attach per-day confidence to a list of observations.
+///
+/// Looks up each observation's document `(source, document_date)`, resolves
+/// the wearable source-days once, and maps every observation to its
+/// confidence (CCDA / non-wearable / null replay-day → `Confirmed`).
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if any index read fails.
+pub async fn annotate_observations(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    observations: Vec<Observation>,
+) -> Result<Vec<ObservationWithConfidence>, sqlx::Error> {
+    let mut doc_meta: HashMap<i64, (String, Option<String>)> = HashMap::new();
+    for obs in &observations {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            doc_meta.entry(obs.source_document_id)
+        {
+            if let Some(doc) = get_source_document_by_id(pool, obs.source_document_id).await? {
+                entry.insert((doc.source, doc.document_date));
+            }
+        }
+    }
+
+    let keys = wearable_keys(
+        doc_meta
+            .values()
+            .map(|(source, date)| (source.as_str(), date.as_deref())),
+    );
+    let resolved = resolve_source_day_confidence(pool, now, &keys).await?;
+
+    Ok(observations
+        .into_iter()
+        .map(|obs| {
+            let confidence = match doc_meta.get(&obs.source_document_id) {
+                Some((source, date)) => confidence_for_doc(source, date.as_deref(), &resolved),
+                None => DayConfidence::Confirmed,
+            };
+            ObservationWithConfidence {
+                observation: obs,
+                confidence,
+            }
+        })
+        .collect())
+}
+
+/// Roll up per-bucket confidence from `(bucket_day, source, document_date)`
+/// contributions.
+///
+/// A bucket is `Provisional` if ANY contributing source-day is provisional;
+/// otherwise `Confirmed`. The confidence day-key is the source's replay day
+/// (`document_date`), while the bucket key is the observation's UTC calendar
+/// day — for a midnight-crossing run these can differ, so the roll-up may
+/// flag a bucket based on a neighboring source-day. This is conservative
+/// (over-flags toward `provisional`, never under-flags) and intentional.
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if resolving source-day confidence fails.
+pub async fn roll_up_bucket_confidence(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    contributions: &[(String, String, Option<String>)],
+) -> Result<HashMap<String, DayConfidence>, sqlx::Error> {
+    let keys = wearable_keys(
+        contributions
+            .iter()
+            .map(|(_, source, date)| (source.as_str(), date.as_deref())),
+    );
+    let resolved = resolve_source_day_confidence(pool, now, &keys).await?;
+
+    let mut out: HashMap<String, DayConfidence> = HashMap::new();
+    for (bucket, source, date) in contributions {
+        let confidence = confidence_for_doc(source, date.as_deref(), &resolved);
+        let entry = out
+            .entry(bucket.clone())
+            .or_insert(DayConfidence::Confirmed);
+        if confidence == DayConfidence::Provisional {
+            *entry = DayConfidence::Provisional;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::BlobKey;
     use crate::index::{
-        open_pool, upsert_source_day_state, upsert_source_state, UpsertSourceDayStateParams,
-        UpsertSourceStateParams,
+        insert_observation, insert_source_document, open_pool, upsert_source_day_state,
+        upsert_source_state, InsertObservationParams, InsertSourceDocumentParams,
+        UpsertSourceDayStateParams, UpsertSourceStateParams,
     };
     use time::macros::datetime;
 
@@ -187,5 +325,112 @@ mod tests {
             out[&("epic".to_owned(), "2026-01-10".to_owned())],
             DayConfidence::Confirmed
         );
+    }
+
+    async fn seed_doc(
+        pool: &SqlitePool,
+        source: &str,
+        document_date: Option<&str>,
+        hex: &str,
+    ) -> i64 {
+        let key = BlobKey::from_hex_str(hex).expect("valid key");
+        insert_source_document(
+            pool,
+            InsertSourceDocumentParams {
+                archive_key: &key,
+                kind: "test",
+                source,
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+                document_date,
+            },
+        )
+        .await
+        .expect("insert doc")
+    }
+
+    async fn seed_obs(
+        pool: &SqlitePool,
+        doc_id: i64,
+        start: OffsetDateTime,
+    ) -> crate::index::Observation {
+        let id = insert_observation(
+            pool,
+            InsertObservationParams {
+                source_document_id: doc_id,
+                coding_system: "http://loinc.org",
+                coding_code: "8867-4",
+                coding_display: None,
+                effective_start: start,
+                effective_end: None,
+                value_quantity: Some(72.0),
+                value_string: None,
+                value_unit: None,
+            },
+        )
+        .await
+        .expect("insert obs");
+        crate::index::Observation {
+            id,
+            source_document_id: doc_id,
+            coding_system: "http://loinc.org".to_owned(),
+            coding_code: "8867-4".to_owned(),
+            coding_display: None,
+            effective_start: start,
+            effective_end: None,
+            value_quantity: Some(72.0),
+            value_string: None,
+            value_unit: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn annotate_marks_fitbit_no_frontier_provisional_ccda_confirmed() {
+        let pool = pool().await;
+        let fitbit_doc = seed_doc(
+            &pool,
+            "fitbit",
+            Some("2026-01-10"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .await;
+        let ccda_doc = seed_doc(
+            &pool,
+            "epic",
+            None,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .await;
+        let o1 = seed_obs(&pool, fitbit_doc, datetime!(2026-01-10 08:00:00 UTC)).await;
+        let o2 = seed_obs(&pool, ccda_doc, datetime!(2026-01-10 09:00:00 UTC)).await;
+
+        let annotated =
+            annotate_observations(&pool, datetime!(2026-01-20 00:00:00 UTC), vec![o1, o2])
+                .await
+                .expect("annotate");
+
+        assert_eq!(annotated[0].confidence, DayConfidence::Provisional);
+        assert_eq!(annotated[1].confidence, DayConfidence::Confirmed);
+    }
+
+    #[tokio::test]
+    async fn roll_up_bucket_is_provisional_if_any_contributor_provisional() {
+        let pool = pool().await;
+        // No frontier for fitbit → its day is provisional; ccda day is confirmed.
+        let contributions = vec![
+            ("2026-01-10".to_owned(), "epic".to_owned(), None),
+            (
+                "2026-01-10".to_owned(),
+                "fitbit".to_owned(),
+                Some("2026-01-10".to_owned()),
+            ),
+            ("2026-01-11".to_owned(), "epic".to_owned(), None),
+        ];
+        let map =
+            roll_up_bucket_confidence(&pool, datetime!(2026-01-20 00:00:00 UTC), &contributions)
+                .await
+                .expect("roll up");
+        assert_eq!(map["2026-01-10"], DayConfidence::Provisional);
+        assert_eq!(map["2026-01-11"], DayConfidence::Confirmed);
     }
 }
