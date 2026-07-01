@@ -173,10 +173,14 @@ shared fragment or a helper that both code paths call).
 - **Longest-run midnight-crossing subtlety.** `longest_continuous_in_value_range`
   attributes a whole run to the UTC day its first interval started, but the
   confidence roll-up keys on each contributing observation's `effective_start`
-  UTC day. For a midnight-crossing run these can differ, so the roll-up may flag
-  a bucket `provisional` based on a neighboring source-day. This is conservative
-  (it over-flags toward `provisional`, never under-flags) and is intentional;
-  document it in the function.
+  UTC day. For a midnight-crossing run these can differ: usually this over-flags
+  a bucket `provisional` based on a neighboring source-day (conservative), but a
+  run whose pre-midnight samples come from a confirmed source-document and whose
+  post-midnight samples come from a distinct provisional document can leave the
+  run's start-day bucket reading `confirmed` despite containing provisional
+  data — a narrow under-flag. `duration_in_value_range` does not have this
+  issue: it buckets each interval by its own day, matching the roll-up
+  exactly. Document both behaviors in the function.
 
 ## Serialization detail
 

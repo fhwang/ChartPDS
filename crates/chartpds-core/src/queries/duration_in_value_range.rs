@@ -189,22 +189,8 @@ async fn duration_by_day(
     .fetch_all(pool)
     .await?;
 
-    let contrib = sqlx::query!(
-        r#"
-        SELECT date(o.effective_start) AS "bucket!: String",
-               sd.source AS "source!: String",
-               sd.document_date AS "document_date?: String"
-        FROM observations o
-        JOIN source_documents sd ON o.source_document_id = sd.id
-        WHERE o.coding_system = ?
-          AND o.coding_code = ?
-          AND o.effective_start >= ?
-          AND o.effective_start < ?
-          AND o.effective_end IS NOT NULL
-          AND o.value_quantity >= ?
-          AND o.value_quantity <= ?
-        GROUP BY date(o.effective_start), sd.source, sd.document_date
-        "#,
+    let contributions = crate::queries::day_confidence::contributions_for_filter(
+        pool,
         coding_system,
         coding_code,
         start,
@@ -212,13 +198,7 @@ async fn duration_by_day(
         value_min,
         value_max,
     )
-    .fetch_all(pool)
     .await?;
-
-    let contributions: Vec<(String, String, Option<String>)> = contrib
-        .into_iter()
-        .map(|r| (r.bucket, r.source, r.document_date))
-        .collect();
     let confidence_by_bucket = roll_up_bucket_confidence(pool, now, &contributions).await?;
 
     Ok(DurationInRange::Buckets {

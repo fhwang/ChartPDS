@@ -24,6 +24,12 @@ pub struct BucketLongest {
     pub longest_minutes: f64,
     /// Confidence of the bucket: `Provisional` if any contributing source-day
     /// (keyed by observation UTC day) is provisional, else `Confirmed`.
+    ///
+    /// Because a run is attributed to its start day while confidence is
+    /// keyed by each observation's own UTC day, a midnight-crossing run
+    /// spanning a confirmed pre-midnight document and a provisional
+    /// post-midnight document can leave this bucket reading `Confirmed`
+    /// despite containing provisional data — a narrow under-flag.
     pub confidence: DayConfidence,
 }
 
@@ -221,22 +227,8 @@ async fn bucket_confidence_for(
         value_max,
         gap_seconds: _,
     } = params;
-    let contrib = sqlx::query!(
-        r#"
-        SELECT date(o.effective_start) AS "bucket!: String",
-               sd.source AS "source!: String",
-               sd.document_date AS "document_date?: String"
-        FROM observations o
-        JOIN source_documents sd ON o.source_document_id = sd.id
-        WHERE o.coding_system = ?
-          AND o.coding_code = ?
-          AND o.effective_start >= ?
-          AND o.effective_start < ?
-          AND o.effective_end IS NOT NULL
-          AND o.value_quantity >= ?
-          AND o.value_quantity <= ?
-        GROUP BY date(o.effective_start), sd.source, sd.document_date
-        "#,
+    let contributions = crate::queries::day_confidence::contributions_for_filter(
+        pool,
         coding_system,
         coding_code,
         start,
@@ -244,13 +236,7 @@ async fn bucket_confidence_for(
         value_min,
         value_max,
     )
-    .fetch_all(pool)
     .await?;
-
-    let contributions: Vec<(String, String, Option<String>)> = contrib
-        .into_iter()
-        .map(|r| (r.bucket, r.source, r.document_date))
-        .collect();
     roll_up_bucket_confidence(pool, now, &contributions).await
 }
 
