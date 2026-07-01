@@ -504,6 +504,7 @@ impl ChartPdsServer {
 
         let result = chartpds_core::queries::duration_in_value_range(
             &self.pool,
+            time::OffsetDateTime::now_utc(),
             chartpds_core::queries::DurationInValueRangeParams {
                 coding_system: &args.coding.system,
                 coding_code: &args.coding.code,

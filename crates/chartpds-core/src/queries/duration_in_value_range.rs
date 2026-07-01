@@ -8,6 +8,9 @@
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
+use crate::queries::roll_up_bucket_confidence;
+use crate::sources::DayConfidence;
+
 /// How to group aggregated durations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bucket {
@@ -24,6 +27,9 @@ pub struct BucketMinutes {
     pub bucket_start: String,
     /// Total minutes inside the value range for the bucket.
     pub total_minutes: f64,
+    /// Confidence of the bucket: `Provisional` if any contributing source-day
+    /// is provisional, else `Confirmed`.
+    pub confidence: DayConfidence,
 }
 
 /// Result of [`duration_in_value_range`].
@@ -73,101 +79,168 @@ pub struct DurationInValueRangeParams<'a> {
 /// Returns `sqlx::Error` if the query fails.
 pub async fn duration_in_value_range(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     params: DurationInValueRangeParams<'_>,
 ) -> Result<DurationInRange, sqlx::Error> {
-    let DurationInValueRangeParams {
+    match params.bucket {
+        Bucket::None => duration_total(pool, &params).await,
+        Bucket::Day => duration_by_day(pool, now, &params).await,
+    }
+}
+
+/// Un-bucketed path for [`duration_in_value_range`] (`Bucket::None`).
+///
+/// Split out from `duration_in_value_range` to keep that function within the
+/// line-count lint; the query and logic are unchanged from before per-bucket
+/// confidence was added.
+async fn duration_total(
+    pool: &SqlitePool,
+    params: &DurationInValueRangeParams<'_>,
+) -> Result<DurationInRange, sqlx::Error> {
+    let &DurationInValueRangeParams {
         coding_system,
         coding_code,
         start,
         end,
         value_min,
         value_max,
-        bucket,
+        bucket: _,
     } = params;
-    match bucket {
-        Bucket::None => {
-            let row = sqlx::query!(
-                r#"
-                SELECT COALESCE(
-                           SUM(
-                               CAST(strftime('%s', effective_end) AS INTEGER)
-                               - CAST(strftime('%s', effective_start) AS INTEGER)
-                           ),
-                           0
-                       ) AS "total_seconds!: i64"
-                FROM observations
-                WHERE coding_system = ?
-                  AND coding_code = ?
-                  AND effective_start >= ?
-                  AND effective_start < ?
-                  AND effective_end IS NOT NULL
-                  AND value_quantity >= ?
-                  AND value_quantity <= ?
-                "#,
-                coding_system,
-                coding_code,
-                start,
-                end,
-                value_min,
-                value_max,
-            )
-            .fetch_one(pool)
-            .await?;
+    let row = sqlx::query!(
+        r#"
+        SELECT COALESCE(
+                   SUM(
+                       CAST(strftime('%s', effective_end) AS INTEGER)
+                       - CAST(strftime('%s', effective_start) AS INTEGER)
+                   ),
+                   0
+               ) AS "total_seconds!: i64"
+        FROM observations
+        WHERE coding_system = ?
+          AND coding_code = ?
+          AND effective_start >= ?
+          AND effective_start < ?
+          AND effective_end IS NOT NULL
+          AND value_quantity >= ?
+          AND value_quantity <= ?
+        "#,
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+    )
+    .fetch_one(pool)
+    .await?;
 
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "total_seconds for realistic observation windows fits f64 without loss"
-            )]
-            let total_minutes = row.total_seconds as f64 / 60.0;
-            Ok(DurationInRange::Total { total_minutes })
-        }
-        Bucket::Day => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT date(effective_start) AS "day!: String",
-                       SUM(
-                           CAST(strftime('%s', effective_end) AS INTEGER)
-                           - CAST(strftime('%s', effective_start) AS INTEGER)
-                       ) AS "total_seconds!: i64"
-                FROM observations
-                WHERE coding_system = ?
-                  AND coding_code = ?
-                  AND effective_start >= ?
-                  AND effective_start < ?
-                  AND effective_end IS NOT NULL
-                  AND value_quantity >= ?
-                  AND value_quantity <= ?
-                GROUP BY date(effective_start)
-                ORDER BY date(effective_start)
-                "#,
-                coding_system,
-                coding_code,
-                start,
-                end,
-                value_min,
-                value_max,
-            )
-            .fetch_all(pool)
-            .await?;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "total_seconds for realistic observation windows fits f64 without loss"
+    )]
+    let total_minutes = row.total_seconds as f64 / 60.0;
+    Ok(DurationInRange::Total { total_minutes })
+}
 
-            Ok(DurationInRange::Buckets {
-                per_bucket: rows
-                    .into_iter()
-                    .map(|r| {
-                        #[allow(
-                            clippy::cast_precision_loss,
-                            reason = "total_seconds for realistic observation windows fits f64 without loss"
-                        )]
-                        let total_minutes = r.total_seconds as f64 / 60.0;
-                        BucketMinutes {
-                            bucket_start: r.day,
-                            total_minutes,
-                        }
-                    })
-                    .collect(),
+/// Per-day path for [`duration_in_value_range`] (`Bucket::Day`).
+///
+/// Split out from `duration_in_value_range` to keep that function within the
+/// line-count lint: this arm additionally rolls up per-bucket confidence via
+/// a companion query over the same filter, on top of the totals aggregation.
+async fn duration_by_day(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    params: &DurationInValueRangeParams<'_>,
+) -> Result<DurationInRange, sqlx::Error> {
+    let &DurationInValueRangeParams {
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+        bucket: _,
+    } = params;
+    let rows = sqlx::query!(
+        r#"
+        SELECT date(effective_start) AS "day!: String",
+               SUM(
+                   CAST(strftime('%s', effective_end) AS INTEGER)
+                   - CAST(strftime('%s', effective_start) AS INTEGER)
+               ) AS "total_seconds!: i64"
+        FROM observations
+        WHERE coding_system = ?
+          AND coding_code = ?
+          AND effective_start >= ?
+          AND effective_start < ?
+          AND effective_end IS NOT NULL
+          AND value_quantity >= ?
+          AND value_quantity <= ?
+        GROUP BY date(effective_start)
+        ORDER BY date(effective_start)
+        "#,
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let contrib = sqlx::query!(
+        r#"
+        SELECT date(o.effective_start) AS "bucket!: String",
+               sd.source AS "source!: String",
+               sd.document_date AS "document_date?: String"
+        FROM observations o
+        JOIN source_documents sd ON o.source_document_id = sd.id
+        WHERE o.coding_system = ?
+          AND o.coding_code = ?
+          AND o.effective_start >= ?
+          AND o.effective_start < ?
+          AND o.effective_end IS NOT NULL
+          AND o.value_quantity >= ?
+          AND o.value_quantity <= ?
+        GROUP BY date(o.effective_start), sd.source, sd.document_date
+        "#,
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let contributions: Vec<(String, String, Option<String>)> = contrib
+        .into_iter()
+        .map(|r| (r.bucket, r.source, r.document_date))
+        .collect();
+    let confidence_by_bucket = roll_up_bucket_confidence(pool, now, &contributions).await?;
+
+    Ok(DurationInRange::Buckets {
+        per_bucket: rows
+            .into_iter()
+            .map(|r| {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "total_seconds for realistic observation windows fits f64 without loss"
+                )]
+                let total_minutes = r.total_seconds as f64 / 60.0;
+                BucketMinutes {
+                    bucket_start: r.day.clone(),
+                    total_minutes,
+                    confidence: confidence_by_bucket
+                        .get(&r.day)
+                        .copied()
+                        .unwrap_or(DayConfidence::Confirmed),
+                }
             })
-        }
-    }
+            .collect(),
+    })
 }
 
 #[cfg(test)]
@@ -175,6 +248,7 @@ mod tests {
     use super::*;
     use crate::clinical::{AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM, SYSTEM_LOINC};
     use crate::queries::test_support::{seed_interval_observations, IntervalObsSpec};
+    use crate::sources::DayConfidence;
     use time::macros::datetime;
 
     // Heart-rate-shaped seed: three 1-minute intervals; BPM 100, 110, 130.
@@ -210,6 +284,7 @@ mod tests {
         // Range 101..118 includes only the 110 bpm minute => 1.0 minute.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -231,6 +306,7 @@ mod tests {
         // Range 90..140 includes all three; day 1 has two minutes, day 2 one.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -249,11 +325,13 @@ mod tests {
                 per_bucket: vec![
                     BucketMinutes {
                         bucket_start: "2026-01-01".to_string(),
-                        total_minutes: 2.0
+                        total_minutes: 2.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                     BucketMinutes {
                         bucket_start: "2026-01-02".to_string(),
-                        total_minutes: 1.0
+                        total_minutes: 1.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                 ],
             }
@@ -274,6 +352,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -295,6 +374,7 @@ mod tests {
         // Window covers only day 1; day-2 row excluded. Range covers all values.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
