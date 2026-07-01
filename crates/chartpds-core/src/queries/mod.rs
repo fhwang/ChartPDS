@@ -8,6 +8,7 @@
 mod counts_per_code;
 mod current_medications;
 mod current_problems;
+mod day_confidence;
 mod duration_in_value_range;
 mod latest_by_code;
 mod list_notifications;
@@ -19,6 +20,10 @@ mod test_support;
 pub use counts_per_code::{counts_per_code, MetricSummary};
 pub use current_medications::{current_medications, CurrentMedication, CurrentMedications};
 pub use current_problems::{current_problems, CurrentProblem, CurrentProblems};
+pub use day_confidence::{
+    annotate_observations, resolve_source_day_confidence, roll_up_bucket_confidence,
+    ObservationWithConfidence,
+};
 pub use duration_in_value_range::{
     duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInRangeError,
     DurationInValueRangeParams,

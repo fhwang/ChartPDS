@@ -193,6 +193,43 @@ pub async fn fetch_by_archive_key(
     }))
 }
 
+/// Fetch a single `source_documents` row by its auto-increment id.
+///
+/// Returns `Ok(None)` if no row has that id.
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if the query fails for any reason other than the row
+/// being absent.
+///
+/// # Panics
+///
+/// Panics if the stored `archive_key` is not valid `BlobKey` hex — an
+/// invariant of the table, so a panic indicates schema corruption.
+pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<SourceDocument>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id AS "id!: i64", archive_key, kind, source, original_filename, archived_at AS "archived_at: OffsetDateTime", document_date
+        FROM source_documents
+        WHERE id = ?
+        "#,
+        id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| SourceDocument {
+        id: r.id,
+        archive_key: BlobKey::from_hex_str(&r.archive_key)
+            .expect("archive_key column always contains a valid BlobKey hex"),
+        kind: r.kind,
+        source: r.source,
+        original_filename: r.original_filename,
+        archived_at: r.archived_at,
+        document_date: r.document_date,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +434,35 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "duplicate archive_key must fail");
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_inserted_document() {
+        let pool = fresh_pool().await;
+        let archive_key = BlobKey::from_hex_str(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect("valid key");
+        let id = insert(
+            &pool,
+            InsertParams {
+                archive_key: &archive_key,
+                kind: "fitbit",
+                source: "fitbit",
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+                document_date: Some("2026-01-10"),
+            },
+        )
+        .await
+        .expect("insert");
+
+        let doc = get_by_id(&pool, id)
+            .await
+            .expect("query")
+            .expect("row present");
+        assert_eq!(doc.source, "fitbit");
+        assert_eq!(doc.document_date.as_deref(), Some("2026-01-10"));
+        assert!(get_by_id(&pool, id + 999).await.expect("query").is_none());
     }
 }

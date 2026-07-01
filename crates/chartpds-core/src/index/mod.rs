@@ -49,7 +49,8 @@ pub use source_day_state::{
     upsert as upsert_source_day_state, SourceDayState, UpsertParams as UpsertSourceDayStateParams,
 };
 pub use source_documents::{
-    fetch_by_archive_key as fetch_source_document_by_archive_key, insert as insert_source_document,
+    fetch_by_archive_key as fetch_source_document_by_archive_key,
+    get_by_id as get_source_document_by_id, insert as insert_source_document,
     insert_superseding as insert_source_document_superseding,
     InsertParams as InsertSourceDocumentParams, SourceDocument, SupersedeOutcome,
 };
