@@ -162,9 +162,13 @@ impl ChartPdsServer {
         &self,
         Parameters(args): Parameters<LatestObservationByCodeArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let observation = chartpds_core::queries::latest_by_code(&self.pool, &args.code)
-            .await
-            .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+        let observation = chartpds_core::queries::latest_by_code(
+            &self.pool,
+            time::OffsetDateTime::now_utc(),
+            &args.code,
+        )
+        .await
+        .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
 
         let json = serde_json::to_string(&observation)
             .map_err(|err| McpError::internal_error(format!("serializing result: {err}"), None))?;
@@ -203,9 +207,15 @@ impl ChartPdsServer {
             })
             .collect();
 
-        let rows = chartpds_core::queries::observation_history(&self.pool, &codings, since, until)
-            .await
-            .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+        let rows = chartpds_core::queries::observation_history(
+            &self.pool,
+            time::OffsetDateTime::now_utc(),
+            &codings,
+            since,
+            until,
+        )
+        .await
+        .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
         let json = serde_json::to_string(&rows)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
