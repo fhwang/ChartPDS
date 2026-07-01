@@ -433,4 +433,41 @@ mod tests {
         assert_eq!(map["2026-01-10"], DayConfidence::Provisional);
         assert_eq!(map["2026-01-11"], DayConfidence::Confirmed);
     }
+
+    #[tokio::test]
+    async fn observation_history_reports_confirmed_for_stable_old_fitbit_day() {
+        use crate::queries::observation_history;
+        use crate::queries::CodingKey;
+
+        let pool = pool().await;
+        let doc = seed_doc(
+            &pool,
+            "fitbit",
+            Some("2026-01-10"),
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .await;
+        let _obs = seed_obs(&pool, doc, datetime!(2026-01-10 08:00:00 UTC)).await;
+
+        // Frontier well past 2026-01-10 + 36h, and a stable two-pull day-state.
+        set_frontier(&pool, "fitbit", "2026-01-12T12:00:00Z").await;
+        set_day_state(&pool, "fitbit", "2026-01-10", 100, Some(100)).await;
+
+        // "now" is 2026-01-20 → the day is outside the 5-day force-refresh window.
+        let rows = observation_history(
+            &pool,
+            datetime!(2026-01-20 00:00:00 UTC),
+            &[CodingKey {
+                coding_system: "http://loinc.org",
+                coding_code: "8867-4",
+            }],
+            None,
+            None,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confidence, DayConfidence::Confirmed);
+    }
 }
