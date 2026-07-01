@@ -19,6 +19,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 reqwest = { workspace = true }
 roxmltree = { workspace = true }
 serde = { workspace = true }

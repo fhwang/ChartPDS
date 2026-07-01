@@ -102,6 +102,9 @@ pub(crate) struct ObservationDurationInRangeArgs {
     pub(crate) value_max: f64,
     /// Bucketing: `"none"` (default, single total) or `"day"` (per UTC day).
     pub(crate) bucket: Option<String>,
+    /// IANA timezone (e.g. `"America/New_York"`) for `day`/`hour` bucket
+    /// boundaries. Omit for UTC (default). No-op for `bucket:"none"`.
+    pub(crate) timezone: Option<String>,
 }
 
 /// Arguments for the `observation_longest_period_in_range` tool.
@@ -471,7 +474,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Total minutes a coded periodic signal spent inside a value range over a window. Args: coding {system, code}, start/end (RFC 3339, half-open), value_min/value_max (inclusive). bucket \"none\" (default) returns {total_minutes}; \"day\" returns {per_bucket:[{bucket_start, total_minutes}]} grouped by UTC day."
+        description = "Total minutes a coded periodic signal spent inside a value range over a window. Args: coding {system, code}, start/end (RFC 3339, half-open), value_min/value_max (inclusive), bucket, timezone. bucket \"none\" (default) returns {total_minutes}; \"day\" and \"hour\" return {per_bucket:[{bucket_start, total_minutes}]}. Empty buckets are omitted. Optional timezone is an IANA name (e.g. \"America/New_York\", DST-aware) setting day/hour boundaries; omit for UTC. bucket_start format: \"YYYY-MM-DD\" for day+UTC (back-compat); otherwise RFC 3339 with the local offset (e.g. \"2026-06-27T02:00:00-04:00\", or \"...Z\" for hour+UTC). timezone is a no-op for bucket \"none\"."
     )]
     async fn observation_duration_in_range(
         &self,
@@ -484,9 +487,10 @@ impl ChartPdsServer {
         let bucket = match args.bucket.as_deref() {
             None | Some("none") => chartpds_core::queries::Bucket::None,
             Some("day") => chartpds_core::queries::Bucket::Day,
+            Some("hour") => chartpds_core::queries::Bucket::Hour,
             Some(other) => {
                 return Err(McpError::invalid_params(
-                    format!("invalid bucket {other:?}; expected \"none\" or \"day\""),
+                    format!("invalid bucket {other:?}; expected \"none\", \"day\", or \"hour\""),
                     None,
                 ))
             }
@@ -502,10 +506,19 @@ impl ChartPdsServer {
                 value_min: args.value_min,
                 value_max: args.value_max,
                 bucket,
+                timezone: args.timezone.as_deref(),
             },
         )
         .await
-        .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+        .map_err(|err| match err {
+            chartpds_core::queries::DurationInRangeError::InvalidTimezone(_) => {
+                McpError::invalid_params(err.to_string(), None)
+            }
+            chartpds_core::queries::DurationInRangeError::Db(_)
+            | chartpds_core::queries::DurationInRangeError::Internal(_) => {
+                McpError::internal_error(format!("query failed: {err}"), None)
+            }
+        })?;
 
         let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
@@ -1152,6 +1165,7 @@ mod tests {
                 value_min: 101.0,
                 value_max: 118.0,
                 bucket: None,
+                timezone: None,
             }))
             .await
             .expect("tool call succeeds");
@@ -1162,6 +1176,38 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         assert_eq!(value["total_minutes"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn observation_duration_in_range_hour_bucket_uses_local_timezone() {
+        let server = fresh_server_with_sleep_epochs().await;
+        let result = server
+            .observation_duration_in_range(Parameters(ObservationDurationInRangeArgs {
+                coding: Coding {
+                    system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage".to_string(),
+                    code: "aasm-sleep-stage".to_string(),
+                },
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-02T00:00:00Z".to_string(),
+                value_min: 1.0,
+                value_max: 4.0, // asleep epochs
+                bucket: Some("hour".to_string()),
+                timezone: Some("America/New_York".to_string()),
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        // 22:00-22:10 UTC = 17:00-17:10 EST -> the 17:00 local hour, 10 minutes.
+        assert_eq!(
+            value["per_bucket"][0]["bucket_start"],
+            "2026-01-01T17:00:00-05:00"
+        );
+        assert_eq!(value["per_bucket"][0]["total_minutes"], 10.0);
     }
 
     async fn fresh_server_with_sleep_epochs() -> ChartPdsServer {
