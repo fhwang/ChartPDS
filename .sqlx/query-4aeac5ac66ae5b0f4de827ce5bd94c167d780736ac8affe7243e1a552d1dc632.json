@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT effective_start AS \"effective_start!: OffsetDateTime\",\n               (CAST(strftime('%s', effective_end) AS INTEGER)\n                - CAST(strftime('%s', effective_start) AS INTEGER)) AS \"duration_seconds!: i64\"\n        FROM observations\n        WHERE coding_system = ?\n          AND coding_code = ?\n          AND effective_start >= ?\n          AND effective_start < ?\n          AND effective_end IS NOT NULL\n          AND value_quantity >= ?\n          AND value_quantity <= ?\n        ORDER BY effective_start\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "effective_start!: OffsetDateTime",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_seconds!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "4aeac5ac66ae5b0f4de827ce5bd94c167d780736ac8affe7243e1a552d1dc632"
+}

@@ -20,7 +20,8 @@ pub use counts_per_code::{counts_per_code, MetricSummary};
 pub use current_medications::{current_medications, CurrentMedication, CurrentMedications};
 pub use current_problems::{current_problems, CurrentProblem, CurrentProblems};
 pub use duration_in_value_range::{
-    duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInValueRangeParams,
+    duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInRangeError,
+    DurationInValueRangeParams,
 };
 pub use latest_by_code::latest_by_code;
 pub use list_notifications::list_recent_notifications;
