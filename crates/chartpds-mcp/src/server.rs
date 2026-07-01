@@ -547,6 +547,7 @@ impl ChartPdsServer {
 
         let result = chartpds_core::queries::longest_continuous_in_value_range(
             &self.pool,
+            time::OffsetDateTime::now_utc(),
             chartpds_core::queries::LongestContinuousParams {
                 coding_system: &args.coding.system,
                 coding_code: &args.coding.code,
