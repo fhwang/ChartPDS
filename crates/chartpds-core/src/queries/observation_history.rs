@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
 use crate::index::Observation;
+use crate::queries::{annotate_observations, ObservationWithConfidence};
 
 /// A `(system, code)` selector for [`observation_history`].
 #[derive(Debug, Clone, Copy)]
@@ -21,16 +22,18 @@ pub struct CodingKey<'a> {
 /// `(coding_system, coding_code, effective_start)`.
 ///
 /// An empty `codings` slice returns an empty vec without touching the database.
+/// Each observation carries its source-day `confidence`.
 ///
 /// # Errors
 ///
 /// Returns `sqlx::Error` if any underlying query fails.
 pub async fn observation_history(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     codings: &[CodingKey<'_>],
     since: Option<OffsetDateTime>,
     until: Option<OffsetDateTime>,
-) -> Result<Vec<Observation>, sqlx::Error> {
+) -> Result<Vec<ObservationWithConfidence>, sqlx::Error> {
     let mut out = Vec::new();
 
     for coding in codings {
@@ -82,7 +85,7 @@ pub async fn observation_history(
             .then_with(|| a.effective_start.cmp(&b.effective_start))
     });
 
-    Ok(out)
+    annotate_observations(pool, now, out).await
 }
 
 #[cfg(test)]
@@ -125,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn empty_codings_returns_empty() {
         let pool = seed().await;
-        let rows = observation_history(&pool, &[], None, None)
+        let rows = observation_history(&pool, datetime!(2026-06-01 00:00:00 UTC), &[], None, None)
             .await
             .expect("query");
         assert!(rows.is_empty());
@@ -136,6 +139,7 @@ mod tests {
         let pool = seed().await;
         let rows = observation_history(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             &[
                 CodingKey {
                     coding_system: LOINC,
@@ -154,11 +158,17 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
         // http://loinc.org sorts before https://chartpds...
-        assert_eq!(rows[0].coding_system, LOINC);
-        assert_eq!(rows[0].effective_start, datetime!(2026-01-01 00:00:00 UTC));
-        assert_eq!(rows[1].coding_system, LOINC);
-        assert_eq!(rows[1].effective_start, datetime!(2026-02-01 00:00:00 UTC));
-        assert_eq!(rows[2].coding_system, AASM);
+        assert_eq!(rows[0].observation.coding_system, LOINC);
+        assert_eq!(
+            rows[0].observation.effective_start,
+            datetime!(2026-01-01 00:00:00 UTC)
+        );
+        assert_eq!(rows[1].observation.coding_system, LOINC);
+        assert_eq!(
+            rows[1].observation.effective_start,
+            datetime!(2026-02-01 00:00:00 UTC)
+        );
+        assert_eq!(rows[2].observation.coding_system, AASM);
     }
 
     #[tokio::test]
@@ -166,6 +176,7 @@ mod tests {
         let pool = seed().await;
         let rows = observation_history(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             &[CodingKey {
                 coding_system: LOINC,
                 coding_code: "8867-4",
@@ -176,7 +187,10 @@ mod tests {
         .await
         .expect("query");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].effective_start, datetime!(2026-02-01 00:00:00 UTC));
+        assert_eq!(
+            rows[0].observation.effective_start,
+            datetime!(2026-02-01 00:00:00 UTC)
+        );
     }
 
     #[tokio::test]
@@ -184,6 +198,7 @@ mod tests {
         let pool = seed().await;
         let rows = observation_history(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             &[CodingKey {
                 coding_system: LOINC,
                 coding_code: "8867-4",
@@ -194,6 +209,9 @@ mod tests {
         .await
         .expect("query");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].effective_start, datetime!(2026-01-01 00:00:00 UTC));
+        assert_eq!(
+            rows[0].observation.effective_start,
+            datetime!(2026-01-01 00:00:00 UTC)
+        );
     }
 }

@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 use sqlx::SqlitePool;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::queries::roll_up_bucket_confidence;
+use crate::sources::DayConfidence;
+
 /// Longest continuous run, in minutes, for one UTC calendar day.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BucketLongest {
@@ -19,6 +22,15 @@ pub struct BucketLongest {
     pub bucket_start: String,
     /// Length of the longest run that started that day, in minutes.
     pub longest_minutes: f64,
+    /// Confidence of the bucket: `Provisional` if any contributing source-day
+    /// (keyed by observation UTC day) is provisional, else `Confirmed`.
+    ///
+    /// Because a run is attributed to its start day while confidence is
+    /// keyed by each observation's own UTC day, a midnight-crossing run
+    /// spanning a confirmed pre-midnight document and a provisional
+    /// post-midnight document can leave this bucket reading `Confirmed`
+    /// despite containing provisional data — a narrow under-flag.
+    pub confidence: DayConfidence,
 }
 
 /// Result of [`longest_continuous_in_value_range`]: per-day longest runs,
@@ -116,9 +128,38 @@ pub struct LongestContinuousParams<'a> {
 /// Returns `sqlx::Error` if the query fails.
 pub async fn longest_continuous_in_value_range(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     params: LongestContinuousParams<'_>,
 ) -> Result<LongestContinuousInRange, sqlx::Error> {
-    let LongestContinuousParams {
+    let by_day = longest_by_day(pool, &params).await?;
+    let confidence_by_bucket = bucket_confidence_for(pool, now, &params).await?;
+
+    Ok(LongestContinuousInRange {
+        per_bucket: by_day
+            .into_iter()
+            .map(|(bucket_start, longest_minutes)| BucketLongest {
+                confidence: confidence_by_bucket
+                    .get(&bucket_start)
+                    .copied()
+                    .unwrap_or(DayConfidence::Confirmed),
+                bucket_start,
+                longest_minutes,
+            })
+            .collect(),
+    })
+}
+
+/// Fetch qualifying intervals and reduce them to the longest run per UTC
+/// start day.
+///
+/// Split out from `longest_continuous_in_value_range` to keep that function
+/// within the line-count lint; the query and walker logic are unchanged from
+/// before per-bucket confidence was added.
+async fn longest_by_day(
+    pool: &SqlitePool,
+    params: &LongestContinuousParams<'_>,
+) -> Result<BTreeMap<String, f64>, sqlx::Error> {
+    let &LongestContinuousParams {
         coding_system,
         coding_code,
         start,
@@ -162,16 +203,41 @@ pub async fn longest_continuous_in_value_range(
         let entry = by_day.entry(day).or_insert(0.0);
         *entry = entry.max(run.minutes);
     }
+    Ok(by_day)
+}
 
-    Ok(LongestContinuousInRange {
-        per_bucket: by_day
-            .into_iter()
-            .map(|(bucket_start, longest_minutes)| BucketLongest {
-                bucket_start,
-                longest_minutes,
-            })
-            .collect(),
-    })
+/// Roll up per-bucket confidence for the same filter as the interval fetch
+/// in [`longest_continuous_in_value_range`].
+///
+/// Split out from `longest_continuous_in_value_range` to keep that function
+/// within the line-count lint: this companion query gathers per-source-day
+/// contributions (grouped by UTC observation day, source, and document date)
+/// and folds them through `roll_up_bucket_confidence`.
+async fn bucket_confidence_for(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    params: &LongestContinuousParams<'_>,
+) -> Result<std::collections::HashMap<String, DayConfidence>, sqlx::Error> {
+    let &LongestContinuousParams {
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+        gap_seconds: _,
+    } = params;
+    let contributions = crate::queries::day_confidence::contributions_for_filter(
+        pool,
+        coding_system,
+        coding_code,
+        start,
+        end,
+        value_min,
+        value_max,
+    )
+    .await?;
+    roll_up_bucket_confidence(pool, now, &contributions).await
 }
 
 #[cfg(test)]
@@ -179,6 +245,7 @@ mod tests {
     use super::*;
     use crate::clinical::{AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM};
     use crate::queries::test_support::{seed_interval_observations, IntervalObsSpec};
+    use crate::sources::DayConfidence;
     use time::macros::datetime;
 
     // --- pure walker tests ---
@@ -276,6 +343,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = longest_continuous_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             LongestContinuousParams {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
@@ -294,6 +362,7 @@ mod tests {
                 per_bucket: vec![BucketLongest {
                     bucket_start: "2026-01-01".to_string(),
                     longest_minutes: 10.0,
+                    confidence: DayConfidence::Confirmed,
                 }],
             }
         );
@@ -330,6 +399,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = longest_continuous_in_value_range(
             &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
             LongestContinuousParams {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
@@ -348,6 +418,7 @@ mod tests {
                 per_bucket: vec![BucketLongest {
                     bucket_start: "2026-01-01".to_string(),
                     longest_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 }],
             }
         );

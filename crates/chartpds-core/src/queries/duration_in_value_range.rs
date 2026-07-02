@@ -17,6 +17,9 @@ use sqlx::SqlitePool;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
+use crate::queries::roll_up_bucket_confidence;
+use crate::sources::DayConfidence;
+
 /// How to group aggregated durations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bucket {
@@ -115,6 +118,7 @@ fn bucket_local(
                     .format(&Rfc3339)
                     .map_err(|err| DurationInRangeError::Internal(err.to_string()))?,
                 total_minutes,
+                confidence: DayConfidence::Confirmed,
             })
         })
         .collect()
@@ -134,6 +138,11 @@ pub struct BucketMinutes {
     pub bucket_start: String,
     /// Total minutes inside the value range for the bucket.
     pub total_minutes: f64,
+    /// Confidence of the bucket: `Provisional` if any contributing source-day
+    /// is provisional, else `Confirmed`. For local (timezone/hour) buckets this
+    /// is keyed by the bucket start instant's UTC calendar day — a conservative
+    /// approximation for buckets that straddle UTC midnight.
+    pub confidence: DayConfidence,
 }
 
 /// Result of [`duration_in_value_range`].
@@ -202,6 +211,7 @@ struct RangeQuery<'a> {
 /// date/time conversion fails unexpectedly.
 pub async fn duration_in_value_range(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     params: DurationInValueRangeParams<'_>,
 ) -> Result<DurationInRange, DurationInRangeError> {
     let DurationInValueRangeParams {
@@ -225,12 +235,14 @@ pub async fn duration_in_value_range(
     match (bucket, timezone) {
         // Back-compat SQL fast paths (no rows shipped to Rust).
         (Bucket::None, _) => total_in_range(pool, &query).await,
-        (Bucket::Day, None) => day_bucket_sql(pool, &query).await,
+        (Bucket::Day, None) => day_bucket_sql(pool, now, &query).await,
         // Local-time paths: filter+duration in SQL, bucket in Rust.
         (Bucket::Day, Some(_)) => {
-            local_bucketed(pool, &query, LocalGranularity::Day, timezone).await
+            local_bucketed(pool, now, &query, LocalGranularity::Day, timezone).await
         }
-        (Bucket::Hour, _) => local_bucketed(pool, &query, LocalGranularity::Hour, timezone).await,
+        (Bucket::Hour, _) => {
+            local_bucketed(pool, now, &query, LocalGranularity::Hour, timezone).await
+        }
     }
 }
 
@@ -279,6 +291,7 @@ async fn total_in_range(
 /// calendar day directly in `SQLite`.
 async fn day_bucket_sql(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     query: &RangeQuery<'_>,
 ) -> Result<DurationInRange, DurationInRangeError> {
     let rows = sqlx::query!(
@@ -309,6 +322,18 @@ async fn day_bucket_sql(
     .fetch_all(pool)
     .await?;
 
+    let contributions = crate::queries::day_confidence::contributions_for_filter(
+        pool,
+        query.coding_system,
+        query.coding_code,
+        query.start,
+        query.end,
+        query.value_min,
+        query.value_max,
+    )
+    .await?;
+    let confidence_by_bucket = roll_up_bucket_confidence(pool, now, &contributions).await?;
+
     Ok(DurationInRange::Buckets {
         per_bucket: rows
             .into_iter()
@@ -319,6 +344,10 @@ async fn day_bucket_sql(
                 )]
                 let total_minutes = r.total_seconds as f64 / 60.0;
                 BucketMinutes {
+                    confidence: confidence_by_bucket
+                        .get(&r.day)
+                        .copied()
+                        .unwrap_or(DayConfidence::Confirmed),
                     bucket_start: r.day,
                     total_minutes,
                 }
@@ -331,14 +360,47 @@ async fn day_bucket_sql(
 /// Rust by local hour or day (see [`bucket_local`]).
 async fn local_bucketed(
     pool: &SqlitePool,
+    now: OffsetDateTime,
     query: &RangeQuery<'_>,
     granularity: LocalGranularity,
     timezone: Option<&str>,
 ) -> Result<DurationInRange, DurationInRangeError> {
     let rows = fetch_interval_rows(pool, query).await?;
-    Ok(DurationInRange::Buckets {
-        per_bucket: bucket_local(&rows, granularity, timezone)?,
-    })
+    let mut per_bucket = bucket_local(&rows, granularity, timezone)?;
+
+    let contributions = crate::queries::day_confidence::contributions_for_filter(
+        pool,
+        query.coding_system,
+        query.coding_code,
+        query.start,
+        query.end,
+        query.value_min,
+        query.value_max,
+    )
+    .await?;
+    let confidence_by_day = roll_up_bucket_confidence(pool, now, &contributions).await?;
+    for b in &mut per_bucket {
+        let utc_day = utc_day_of_rfc3339(&b.bucket_start)?;
+        b.confidence = confidence_by_day
+            .get(&utc_day)
+            .copied()
+            .unwrap_or(DayConfidence::Confirmed);
+    }
+
+    Ok(DurationInRange::Buckets { per_bucket })
+}
+
+/// UTC calendar day (`YYYY-MM-DD`) of an RFC 3339 timestamp string.
+fn utc_day_of_rfc3339(s: &str) -> Result<String, DurationInRangeError> {
+    let dt = OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|err| DurationInRangeError::Internal(err.to_string()))?
+        .to_offset(UtcOffset::UTC);
+    Ok(format!(
+        "{:04}-{:02}-{:02}",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day()
+    ))
 }
 
 /// Fetch `(effective_start, duration_seconds)` for every in-range interval.
@@ -381,6 +443,7 @@ mod tests {
     use super::*;
     use crate::clinical::{AASM_SLEEP_STAGE_CODE, AASM_SLEEP_STAGE_SYSTEM, SYSTEM_LOINC};
     use crate::queries::test_support::{seed_interval_observations, IntervalObsSpec};
+    use crate::sources::DayConfidence;
     use time::macros::datetime;
 
     // Heart-rate-shaped seed: three 1-minute intervals; BPM 100, 110, 130.
@@ -438,6 +501,7 @@ mod tests {
         // Range 101..118 includes only the 110 bpm minute => 1.0 minute.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -460,6 +524,7 @@ mod tests {
         // Range 90..140 includes all three; day 1 has two minutes, day 2 one.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -479,11 +544,13 @@ mod tests {
                 per_bucket: vec![
                     BucketMinutes {
                         bucket_start: "2026-01-01".to_string(),
-                        total_minutes: 2.0
+                        total_minutes: 2.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                     BucketMinutes {
                         bucket_start: "2026-01-02".to_string(),
-                        total_minutes: 1.0
+                        total_minutes: 1.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                 ],
             }
@@ -504,6 +571,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&specs).await;
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -526,6 +594,7 @@ mod tests {
         // Window covers only day 1; day-2 row excluded. Range covers all values.
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
@@ -547,6 +616,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&two_wake_epochs()).await;
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
@@ -566,11 +636,13 @@ mod tests {
                 per_bucket: vec![
                     BucketMinutes {
                         bucket_start: "2026-06-27T06:00:00Z".into(),
-                        total_minutes: 5.0
+                        total_minutes: 5.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                     BucketMinutes {
                         bucket_start: "2026-06-27T07:00:00Z".into(),
-                        total_minutes: 5.0
+                        total_minutes: 5.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                 ],
             }
@@ -582,6 +654,7 @@ mod tests {
         let (pool, _) = seed_interval_observations(&two_wake_epochs()).await;
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
@@ -601,11 +674,13 @@ mod tests {
                 per_bucket: vec![
                     BucketMinutes {
                         bucket_start: "2026-06-27T02:00:00-04:00".into(),
-                        total_minutes: 5.0
+                        total_minutes: 5.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                     BucketMinutes {
                         bucket_start: "2026-06-27T03:00:00-04:00".into(),
-                        total_minutes: 5.0
+                        total_minutes: 5.0,
+                        confidence: DayConfidence::Confirmed,
                     },
                 ],
             }
@@ -618,6 +693,7 @@ mod tests {
         // Both epochs are still on the NY-local 2026-06-27 day (02:30, 03:15).
         let result = duration_in_value_range(
             &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
             DurationInValueRangeParams {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
@@ -636,7 +712,8 @@ mod tests {
             DurationInRange::Buckets {
                 per_bucket: vec![BucketMinutes {
                     bucket_start: "2026-06-27T00:00:00-04:00".into(),
-                    total_minutes: 10.0
+                    total_minutes: 10.0,
+                    confidence: DayConfidence::Confirmed,
                 }],
             }
         );
@@ -651,7 +728,8 @@ mod tests {
             out,
             vec![BucketMinutes {
                 bucket_start: "2026-06-27T06:00:00Z".into(),
-                total_minutes: 5.0
+                total_minutes: 5.0,
+                confidence: DayConfidence::Confirmed,
             }]
         );
     }
@@ -666,7 +744,8 @@ mod tests {
             out,
             vec![BucketMinutes {
                 bucket_start: "2026-06-27T02:00:00-04:00".into(),
-                total_minutes: 5.0
+                total_minutes: 5.0,
+                confidence: DayConfidence::Confirmed,
             }]
         );
     }
@@ -686,11 +765,13 @@ mod tests {
             vec![
                 BucketMinutes {
                     bucket_start: "2026-06-27T02:00:00-04:00".into(),
-                    total_minutes: 10.0
+                    total_minutes: 10.0,
+                    confidence: DayConfidence::Confirmed,
                 },
                 BucketMinutes {
                     bucket_start: "2026-06-27T03:00:00-04:00".into(),
-                    total_minutes: 5.0
+                    total_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 },
             ]
         );
@@ -706,7 +787,8 @@ mod tests {
             out,
             vec![BucketMinutes {
                 bucket_start: "2026-06-26T00:00:00-04:00".into(),
-                total_minutes: 5.0
+                total_minutes: 5.0,
+                confidence: DayConfidence::Confirmed,
             }]
         );
     }
@@ -726,11 +808,13 @@ mod tests {
             vec![
                 BucketMinutes {
                     bucket_start: "2026-11-01T01:00:00-04:00".into(),
-                    total_minutes: 5.0
+                    total_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 },
                 BucketMinutes {
                     bucket_start: "2026-11-01T01:00:00-05:00".into(),
-                    total_minutes: 5.0
+                    total_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 },
             ]
         );
@@ -759,11 +843,13 @@ mod tests {
             vec![
                 BucketMinutes {
                     bucket_start: "2026-06-27T11:00:00+05:30".into(),
-                    total_minutes: 5.0
+                    total_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 },
                 BucketMinutes {
                     bucket_start: "2026-06-27T12:00:00+05:30".into(),
-                    total_minutes: 5.0
+                    total_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
                 },
             ]
         );

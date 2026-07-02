@@ -9,6 +9,7 @@
 /// Used by each adapter's confidence function to decide whether a day
 /// needs to be re-pulled during sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DayConfidence {
     /// Data for this day is stable — no need to re-pull.
     Confirmed,
