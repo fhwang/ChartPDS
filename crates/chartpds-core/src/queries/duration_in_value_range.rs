@@ -161,8 +161,8 @@ pub enum DurationInRange {
     },
 }
 
-/// Parameters for [`duration_in_value_range`].
-pub struct DurationInValueRangeParams<'a> {
+/// A time-in-range question: how long a coded signal spent inside a value range.
+pub struct TimeInRangeQuery<'a> {
     /// FHIR coding system URI.
     pub coding_system: &'a str,
     /// Coding code within `coding_system`.
@@ -212,9 +212,9 @@ struct RangeQuery<'a> {
 pub async fn duration_in_value_range(
     pool: &SqlitePool,
     now: OffsetDateTime,
-    params: DurationInValueRangeParams<'_>,
+    query: TimeInRangeQuery<'_>,
 ) -> Result<DurationInRange, DurationInRangeError> {
-    let DurationInValueRangeParams {
+    let TimeInRangeQuery {
         coding_system,
         coding_code,
         start,
@@ -223,7 +223,7 @@ pub async fn duration_in_value_range(
         value_max,
         bucket,
         timezone,
-    } = params;
+    } = query;
     let query = RangeQuery {
         coding_system,
         coding_code,
@@ -502,7 +502,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
                 start: datetime!(2026-01-01 00:00:00 UTC),
@@ -525,7 +525,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
                 start: datetime!(2026-01-01 00:00:00 UTC),
@@ -572,7 +572,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
                 start: datetime!(2026-01-01 00:00:00 UTC),
@@ -595,7 +595,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: SYSTEM_LOINC,
                 coding_code: "8867-4",
                 start: datetime!(2026-01-01 00:00:00 UTC),
@@ -617,7 +617,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
                 start: datetime!(2026-06-27 00:00:00 UTC),
@@ -655,7 +655,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
                 start: datetime!(2026-06-27 00:00:00 UTC),
@@ -694,7 +694,7 @@ mod tests {
         let result = duration_in_value_range(
             &pool,
             datetime!(2026-07-01 00:00:00 UTC),
-            DurationInValueRangeParams {
+            TimeInRangeQuery {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
                 start: datetime!(2026-06-27 00:00:00 UTC),

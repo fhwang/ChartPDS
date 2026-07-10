@@ -32,6 +32,33 @@ Note on `missing_docs`: the workspace lint config sets it to `warn`, but
 to errors. In practice this means every `pub` item must have a doc comment
 or `just check` will fail.
 
+## No junk parameter types
+
+Never introduce a struct whose only meaning is "the arguments to function X":
+`FooParams`, `FooArgs`, `FooOptions` — or a synonym coined to dodge the gate
+(`FooFields`, `FooInput`, `FooData`). Such a name describes a function
+signature, not the business. `just check` enforces this via
+`scripts/forbid-junk-types.sh`.
+
+When a signature grows past clippy's `too_many_arguments` threshold, do NOT
+bundle the arguments into a signature-shaped struct. In order of preference:
+
+1. **Find the domain concept.** Values that travel together are usually a
+   thing with a name. Established shapes in this codebase:
+   - A to-be-persisted row is `New<Row>` (`NewObservation`, `NewProblem`,
+     `NewSourceDocument`) — the Diesel-style insertable idiom.
+   - The specification of an analytical question is a `...Query`
+     (`TimeInRangeQuery`, `LongestRunQuery`).
+   - A recorded outcome or partial write is an `...Update`
+     (`SyncStatusUpdate`).
+2. **Split the function.** If no domain name fits, the function is probably
+   doing two jobs; `too_many_arguments` caught a real design smell.
+
+Exception: the `*Args` structs in `crates/chartpds-mcp/src/server.rs` are
+wire-boundary DTOs — rmcp's `Parameters<T>` requires a
+`Deserialize + JsonSchema` type per tool. They are allowed in `chartpds-mcp`
+only; the gate encodes exactly this carve-out.
+
 ## Module boundaries
 
 `chartpds-core` is the single library crate. Inside it, default visibility is

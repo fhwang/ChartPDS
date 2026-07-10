@@ -12,8 +12,7 @@ use time::OffsetDateTime;
 
 use crate::archive::BlobKey;
 use crate::index::{
-    insert_observation, insert_source_document, open_pool, InsertObservationParams,
-    InsertSourceDocumentParams,
+    insert_observation, insert_source_document, open_pool, NewObservation, NewSourceDocument,
 };
 
 /// Minimal spec for one observation to seed into the test pool.
@@ -48,7 +47,7 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
 
     let source_document_id = insert_source_document(
         &pool,
-        InsertSourceDocumentParams {
+        NewSourceDocument {
             archive_key: &archive_key,
             kind: "ccda",
             source: "test",
@@ -63,7 +62,7 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
     for spec in observations {
         insert_observation(
             &pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id,
                 coding_system: "http://loinc.org",
                 coding_code: spec.coding_code,
@@ -115,7 +114,7 @@ pub(crate) async fn seed_interval_observations(
 
     let source_document_id = insert_source_document(
         &pool,
-        InsertSourceDocumentParams {
+        NewSourceDocument {
             archive_key: &archive_key,
             kind: "ccda",
             source: "test",
@@ -130,7 +129,7 @@ pub(crate) async fn seed_interval_observations(
     for spec in observations {
         insert_observation(
             &pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id,
                 coding_system: spec.coding_system,
                 coding_code: spec.coding_code,

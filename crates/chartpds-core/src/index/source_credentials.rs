@@ -15,8 +15,8 @@ pub struct SourceCredentials {
     pub updated_at: String,
 }
 
-/// Parameters for [`upsert`].
-pub struct UpsertParams<'a> {
+/// A credentials blob ready to be stored: a [`SourceCredentials`] minus its server-managed `revision`.
+pub struct NewSourceCredentials<'a> {
     /// Source name (primary key).
     pub source_name: &'a str,
     /// JSON-serialised credentials blob.
@@ -33,7 +33,10 @@ pub struct UpsertParams<'a> {
 /// # Errors
 ///
 /// Returns `sqlx::Error` if the upsert fails.
-pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), sqlx::Error> {
+pub async fn upsert(
+    pool: &SqlitePool,
+    credentials: NewSourceCredentials<'_>,
+) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO source_credentials (source_name, credentials_json, revision, updated_at)
@@ -43,9 +46,9 @@ pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), s
             revision = source_credentials.revision + 1,
             updated_at = excluded.updated_at
         "#,
-        params.source_name,
-        params.credentials_json,
-        params.updated_at,
+        credentials.source_name,
+        credentials.credentials_json,
+        credentials.updated_at,
     )
     .execute(pool)
     .await?;
@@ -106,7 +109,7 @@ mod tests {
 
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceCredentials {
                 source_name: "fitbit",
                 credentials_json: r#"{"access_token":"abc"}"#,
                 updated_at: "2026-01-15T10:00:00Z",
@@ -127,7 +130,7 @@ mod tests {
         // Second upsert bumps revision.
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceCredentials {
                 source_name: "fitbit",
                 credentials_json: r#"{"access_token":"def"}"#,
                 updated_at: "2026-01-15T11:00:00Z",

@@ -49,7 +49,7 @@ async fn refresh_access_token(
         .unwrap_or_default();
     index::upsert_source_credentials(
         pool,
-        index::UpsertSourceCredentialsParams {
+        index::NewSourceCredentials {
             source_name: "fitbit",
             credentials_json: &refreshed_json,
             updated_at: &now_str,
@@ -163,7 +163,7 @@ pub async fn sync_recent_days(
     );
     index::upsert_source_state(
         pool,
-        index::UpsertSourceStateParams {
+        index::NewSourceState {
             source_name: "fitbit",
             last_sync_at: Some(&sync_at),
             last_sync_status: Some("ok"),

@@ -26,8 +26,8 @@ pub struct SourceState {
     pub consecutive_sync_failures: i64,
 }
 
-/// Parameters for [`upsert`].
-pub struct UpsertParams<'a> {
+/// A full source-state snapshot ready to be written by an adapter.
+pub struct NewSourceState<'a> {
     /// Source name (primary key).
     pub source_name: &'a str,
     /// ISO-8601 timestamp of this sync attempt.
@@ -58,7 +58,7 @@ pub struct UpsertParams<'a> {
 /// # Errors
 ///
 /// Returns `sqlx::Error` if the upsert fails.
-pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), sqlx::Error> {
+pub async fn upsert(pool: &SqlitePool, state: NewSourceState<'_>) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO source_state (
@@ -78,23 +78,23 @@ pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), s
             frontier_last_advanced_at = excluded.frontier_last_advanced_at,
             consecutive_sync_failures = excluded.consecutive_sync_failures
         "#,
-        params.source_name,
-        params.last_sync_at,
-        params.last_sync_status,
-        params.last_error_message,
-        params.last_error_reason,
-        params.last_synced_window_end,
-        params.freshness_frontier_at,
-        params.frontier_last_advanced_at,
-        params.consecutive_sync_failures,
+        state.source_name,
+        state.last_sync_at,
+        state.last_sync_status,
+        state.last_error_message,
+        state.last_error_reason,
+        state.last_synced_window_end,
+        state.freshness_frontier_at,
+        state.frontier_last_advanced_at,
+        state.consecutive_sync_failures,
     )
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Parameters for [`upsert_sync_status`].
-pub struct UpsertSyncStatusParams<'a> {
+/// The outcome of one sync attempt, as recorded by the daemon tick.
+pub struct SyncStatusUpdate<'a> {
     /// Source name (primary key).
     pub source_name: &'a str,
     /// ISO-8601 timestamp of this sync attempt.
@@ -122,7 +122,7 @@ pub struct UpsertSyncStatusParams<'a> {
 /// Returns `sqlx::Error` if the upsert fails.
 pub async fn upsert_sync_status(
     pool: &SqlitePool,
-    params: UpsertSyncStatusParams<'_>,
+    update: SyncStatusUpdate<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
@@ -138,12 +138,12 @@ pub async fn upsert_sync_status(
             last_error_reason = excluded.last_error_reason,
             consecutive_sync_failures = excluded.consecutive_sync_failures
         "#,
-        params.source_name,
-        params.last_sync_at,
-        params.last_sync_status,
-        params.last_error_message,
-        params.last_error_reason,
-        params.consecutive_sync_failures,
+        update.source_name,
+        update.last_sync_at,
+        update.last_sync_status,
+        update.last_error_message,
+        update.last_error_reason,
+        update.consecutive_sync_failures,
     )
     .execute(pool)
     .await?;
@@ -211,7 +211,7 @@ mod tests {
 
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:00:00Z"),
                 last_sync_status: Some("ok"),
@@ -243,7 +243,7 @@ mod tests {
         // Second upsert replaces all fields.
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T11:00:00Z"),
                 last_sync_status: Some("error"),
@@ -274,7 +274,7 @@ mod tests {
         // Adapter writes the full row, including frontier state.
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:00:00Z"),
                 last_sync_status: Some("ok"),
@@ -292,7 +292,7 @@ mod tests {
         // Status-only write must leave the frontier/window fields untouched.
         upsert_sync_status(
             &pool,
-            UpsertSyncStatusParams {
+            SyncStatusUpdate {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:05:00Z"),
                 last_sync_status: Some("success"),
@@ -328,7 +328,7 @@ mod tests {
         // No prior adapter write (e.g. sync failed before writing state).
         upsert_sync_status(
             &pool,
-            UpsertSyncStatusParams {
+            SyncStatusUpdate {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:00:00Z"),
                 last_sync_status: Some("error"),

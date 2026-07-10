@@ -105,7 +105,7 @@ async fn index_sleep_session(
 ) -> sources::Result<i64> {
     let source_document_id = index::insert_source_document(
         pool,
-        index::InsertSourceDocumentParams {
+        index::NewSourceDocument {
             archive_key,
             kind: KIND,
             source: SOURCE,
@@ -126,7 +126,7 @@ async fn index_sleep_session(
     if let Some(nightly) = parser::nightly_sleep_duration(session)? {
         index::insert_observation(
             pool,
-            index::InsertObservationParams {
+            index::NewObservation {
                 source_document_id,
                 coding_system: SYSTEM_LOINC,
                 coding_code: LOINC_SLEEP_DURATION,
@@ -144,7 +144,7 @@ async fn index_sleep_session(
     if let Some(waso) = parser::wake_after_sleep_onset(session)? {
         index::insert_observation(
             pool,
-            index::InsertObservationParams {
+            index::NewObservation {
                 source_document_id,
                 coding_system: SYSTEM_LOINC,
                 coding_code: LOINC_WASO,
@@ -169,7 +169,7 @@ async fn index_sleep_session(
     let count = observations.len() as i64;
     index::upsert_source_day_state(
         pool,
-        index::UpsertSourceDayStateParams {
+        index::NewSourceDayState {
             source_name: SOURCE,
             date: &session.day,
             samples_count: count,
@@ -193,7 +193,7 @@ async fn insert_sleep_observation(
 
     index::insert_observation(
         pool,
-        index::InsertObservationParams {
+        index::NewObservation {
             source_document_id,
             coding_system: AASM_SLEEP_STAGE_SYSTEM,
             coding_code: AASM_SLEEP_STAGE_CODE,

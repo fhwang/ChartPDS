@@ -6,9 +6,8 @@ use time::OffsetDateTime;
 
 use crate::archive::{Archive, Manifest};
 use crate::index::{
-    insert_medication, insert_observation, insert_problem, insert_source_document,
-    InsertMedicationParams, InsertObservationParams, InsertProblemParams,
-    InsertSourceDocumentParams,
+    insert_medication, insert_observation, insert_problem, insert_source_document, NewMedication,
+    NewObservation, NewProblem, NewSourceDocument,
 };
 use crate::ingestion::ccda::parse::{extract_document_date, parse_xml};
 use crate::ingestion::ccda::self_check::self_check;
@@ -87,7 +86,7 @@ pub async fn ingest(
     // 4. Insert source_documents row.
     let source_document_id = insert_source_document(
         pool,
-        InsertSourceDocumentParams {
+        NewSourceDocument {
             archive_key: &archive_key,
             kind,
             source,
@@ -102,7 +101,7 @@ pub async fn ingest(
     for obs in extracted {
         insert_observation(
             pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id,
                 coding_system: &obs.coding_system,
                 coding_code: &obs.coding_code,
@@ -120,7 +119,7 @@ pub async fn ingest(
     for prob in problems {
         insert_problem(
             pool,
-            InsertProblemParams {
+            NewProblem {
                 source_document_id,
                 coding_system: &prob.coding_system,
                 coding_code: &prob.coding_code,
@@ -135,7 +134,7 @@ pub async fn ingest(
     for med in medications {
         insert_medication(
             pool,
-            InsertMedicationParams {
+            NewMedication {
                 source_document_id,
                 coding_system: &med.coding_system,
                 coding_code: &med.coding_code,

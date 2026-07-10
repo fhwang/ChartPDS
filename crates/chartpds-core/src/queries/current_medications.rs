@@ -125,8 +125,7 @@ mod tests {
     use super::*;
     use crate::archive::BlobKey;
     use crate::index::{
-        insert_medication, insert_source_document, open_pool, InsertMedicationParams,
-        InsertSourceDocumentParams,
+        insert_medication, insert_source_document, open_pool, NewMedication, NewSourceDocument,
     };
     use time::OffsetDateTime;
 
@@ -142,7 +141,7 @@ mod tests {
         let key = BlobKey::from_hex_str(hex).expect("key");
         insert_source_document(
             pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -173,7 +172,7 @@ mod tests {
         for (id, dose) in [(old, "10 mg"), (new, "20 mg")] {
             insert_medication(
                 &pool,
-                InsertMedicationParams {
+                NewMedication {
                     source_document_id: id,
                     coding_system: "http://www.nlm.nih.gov/research/umls/rxnorm",
                     coding_code: "617314",
@@ -214,7 +213,7 @@ mod tests {
         for dose in ["5 mg", "10 mg"] {
             insert_medication(
                 &pool,
-                InsertMedicationParams {
+                NewMedication {
                     source_document_id: doc_id,
                     coding_system: "http://www.nlm.nih.gov/research/umls/rxnorm",
                     coding_code: "861007",

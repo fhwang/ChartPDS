@@ -116,8 +116,7 @@ mod tests {
     use super::*;
     use crate::archive::BlobKey;
     use crate::index::{
-        insert_problem, insert_source_document, open_pool, InsertProblemParams,
-        InsertSourceDocumentParams,
+        insert_problem, insert_source_document, open_pool, NewProblem, NewSourceDocument,
     };
     use time::OffsetDateTime;
 
@@ -133,7 +132,7 @@ mod tests {
         let key = BlobKey::from_hex_str(hex).expect("key");
         insert_source_document(
             pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -165,7 +164,7 @@ mod tests {
         for (id, status) in [(old, "active"), (new, "resolved")] {
             insert_problem(
                 &pool,
-                InsertProblemParams {
+                NewProblem {
                     source_document_id: id,
                     coding_system: "http://snomed.info/sct",
                     coding_code: "44054006",
@@ -207,7 +206,7 @@ mod tests {
             .expect("key");
             insert_source_document(
                 &pool,
-                InsertSourceDocumentParams {
+                NewSourceDocument {
                     archive_key: &key,
                     kind: "ccda",
                     source: "test",
@@ -221,7 +220,7 @@ mod tests {
         };
         insert_problem(
             &pool,
-            InsertProblemParams {
+            NewProblem {
                 source_document_id: dated,
                 coding_system: "http://snomed.info/sct",
                 coding_code: "73211009",
@@ -234,7 +233,7 @@ mod tests {
         .expect("problem");
         insert_problem(
             &pool,
-            InsertProblemParams {
+            NewProblem {
                 source_document_id: null_dated,
                 coding_system: "http://snomed.info/sct",
                 coding_code: "73211009",
@@ -266,7 +265,7 @@ mod tests {
         for onset in ["2020-01-01", "2021-06-15"] {
             insert_problem(
                 &pool,
-                InsertProblemParams {
+                NewProblem {
                     source_document_id: doc_id,
                     coding_system: "http://snomed.info/sct",
                     coding_code: "73211009",

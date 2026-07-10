@@ -28,8 +28,8 @@ pub struct SourceDocument {
     pub document_date: Option<String>,
 }
 
-/// Parameters for [`insert`].
-pub struct InsertParams<'a> {
+/// A source document ready to be inserted: a [`SourceDocument`] minus its `id`.
+pub struct NewSourceDocument<'a> {
     /// Content-addressed key of the archived blob.
     pub archive_key: &'a BlobKey,
     /// Document kind.
@@ -52,8 +52,11 @@ pub struct InsertParams<'a> {
 ///
 /// Returns `sqlx::Error` if the insert fails — typically a unique-constraint
 /// violation on `archive_key`.
-pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, sqlx::Error> {
-    let archive_key = params.archive_key.as_str();
+pub async fn insert(
+    pool: &SqlitePool,
+    document: NewSourceDocument<'_>,
+) -> Result<i64, sqlx::Error> {
+    let archive_key = document.archive_key.as_str();
     let row = sqlx::query!(
         r#"
         INSERT INTO source_documents (archive_key, kind, source, original_filename, archived_at, document_date)
@@ -61,11 +64,11 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         RETURNING id AS "id!: i64"
         "#,
         archive_key,
-        params.kind,
-        params.source,
-        params.original_filename,
-        params.archived_at,
-        params.document_date,
+        document.kind,
+        document.source,
+        document.original_filename,
+        document.archived_at,
+        document.document_date,
     )
     .fetch_one(pool)
     .await?;
@@ -111,11 +114,11 @@ pub enum SupersedeOutcome {
 /// Returns `sqlx::Error` if any of the underlying queries fail.
 pub async fn insert_superseding(
     pool: &SqlitePool,
-    params: InsertParams<'_>,
+    document: NewSourceDocument<'_>,
 ) -> Result<SupersedeOutcome, sqlx::Error> {
-    let Some(date) = params.document_date else {
+    let Some(date) = document.document_date else {
         // No day to supersede by — behave like a plain insert.
-        return Ok(SupersedeOutcome::Inserted(insert(pool, params).await?));
+        return Ok(SupersedeOutcome::Inserted(insert(pool, document).await?));
     };
 
     // Existing documents for this source + day, if any.
@@ -125,7 +128,7 @@ pub async fn insert_superseding(
         FROM source_documents
         WHERE source = ? AND document_date = ?
         "#,
-        params.source,
+        document.source,
         date,
     )
     .fetch_all(pool)
@@ -133,7 +136,7 @@ pub async fn insert_superseding(
 
     // If a strictly-newer document already exists, the incoming pull is stale.
     if let Some(newest) = existing.iter().max_by_key(|r| r.archived_at) {
-        if newest.archived_at > params.archived_at {
+        if newest.archived_at > document.archived_at {
             return Ok(SupersedeOutcome::Superseded(newest.id));
         }
     }
@@ -142,13 +145,13 @@ pub async fn insert_superseding(
     // (cascading observations) and insert the fresh one.
     sqlx::query!(
         "DELETE FROM source_documents WHERE source = ? AND document_date = ?",
-        params.source,
+        document.source,
         date,
     )
     .execute(pool)
     .await?;
 
-    Ok(SupersedeOutcome::Inserted(insert(pool, params).await?))
+    Ok(SupersedeOutcome::Inserted(insert(pool, document).await?))
 }
 
 /// Fetch a `source_documents` row by its archive key.
@@ -257,7 +260,7 @@ mod tests {
 
         let id = insert(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "manual-upload",
@@ -303,7 +306,7 @@ mod tests {
         .expect("valid key");
         insert(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "test",
@@ -336,7 +339,7 @@ mod tests {
         let key2 = key_from_byte(0x22);
         let out = insert_superseding(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &key2,
                 kind: "fitbit-intraday-hr-day",
                 source: "fitbit",
@@ -353,7 +356,7 @@ mod tests {
         let key1 = key_from_byte(0x11);
         let out = insert_superseding(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &key1,
                 kind: "fitbit-intraday-hr-day",
                 source: "fitbit",
@@ -373,7 +376,7 @@ mod tests {
         let key3 = key_from_byte(0x33);
         let out = insert_superseding(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &key3,
                 kind: "fitbit-intraday-hr-day",
                 source: "fitbit",
@@ -408,7 +411,7 @@ mod tests {
 
         insert(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "src",
@@ -422,7 +425,7 @@ mod tests {
 
         let result = insert(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "src",
@@ -445,7 +448,7 @@ mod tests {
         .expect("valid key");
         let id = insert(
             &pool,
-            InsertParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "fitbit",
                 source: "fitbit",

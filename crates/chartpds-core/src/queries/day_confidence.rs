@@ -277,8 +277,7 @@ mod tests {
     use crate::archive::BlobKey;
     use crate::index::{
         insert_observation, insert_source_document, open_pool, upsert_source_day_state,
-        upsert_source_state, InsertObservationParams, InsertSourceDocumentParams,
-        UpsertSourceDayStateParams, UpsertSourceStateParams,
+        upsert_source_state, NewObservation, NewSourceDayState, NewSourceDocument, NewSourceState,
     };
     use time::macros::datetime;
 
@@ -293,7 +292,7 @@ mod tests {
     async fn set_frontier(pool: &SqlitePool, source: &str, frontier: &str) {
         upsert_source_state(
             pool,
-            UpsertSourceStateParams {
+            NewSourceState {
                 source_name: source,
                 last_sync_at: None,
                 last_sync_status: None,
@@ -318,7 +317,7 @@ mod tests {
     ) {
         upsert_source_day_state(
             pool,
-            UpsertSourceDayStateParams {
+            NewSourceDayState {
                 source_name: source,
                 date,
                 samples_count: count,
@@ -401,7 +400,7 @@ mod tests {
         let key = BlobKey::from_hex_str(hex).expect("valid key");
         insert_source_document(
             pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "test",
                 source,
@@ -421,7 +420,7 @@ mod tests {
     ) -> crate::index::Observation {
         let id = insert_observation(
             pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id: doc_id,
                 coding_system: "http://loinc.org",
                 coding_code: "8867-4",

@@ -7,7 +7,7 @@ default:
 # Run the full check pipeline (format, lint, type-check, test, holdout lockfile
 # verify, deny, machete, and verify the sqlx offline cache is in sync with the
 # current migrations).
-check: _verify-tools _check-sql fmt-check lint typecheck test holdout-verify deny machete
+check: _verify-tools _check-sql fmt-check lint junk-types typecheck test holdout-verify deny machete
 
 # Verify the .sqlx/ offline cache matches the current schema + queries. Drops
 # and rebuilds a temporary SQLite from migrations, then `cargo sqlx prepare
@@ -40,6 +40,11 @@ fmt:
 # Run clippy with the aggressive workspace profile.
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Forbid junk parameter-object types (struct *Params/*Options, core *Args).
+# See "No junk parameter types" in CLAUDE.md.
+junk-types:
+    ./scripts/forbid-junk-types.sh
 
 # Type-check without compiling artifacts.
 typecheck:

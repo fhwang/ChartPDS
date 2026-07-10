@@ -130,7 +130,7 @@ pub(crate) async fn record_sync_success(pool: &SqlitePool, source_name: &str) {
     // adapter's sync() and must not be clobbered here.
     if let Err(err) = index::upsert_source_sync_status(
         pool,
-        index::UpsertSourceSyncStatusParams {
+        index::SyncStatusUpdate {
             source_name,
             last_sync_at: Some(&now),
             last_sync_status: Some("success"),
@@ -171,7 +171,7 @@ pub(crate) async fn record_sync_error(pool: &SqlitePool, source_name: &str, err:
     // Status-only write: preserve the adapter-owned frontier/window fields.
     if let Err(db_err) = index::upsert_source_sync_status(
         pool,
-        index::UpsertSourceSyncStatusParams {
+        index::SyncStatusUpdate {
             source_name,
             last_sync_at: Some(&now),
             last_sync_status: Some("error"),
@@ -223,7 +223,7 @@ mod tests {
         // Seed with one prior failure so we can verify it resets.
         index::upsert_source_state(
             &pool,
-            index::UpsertSourceStateParams {
+            index::NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-01T00:00:00Z"),
                 last_sync_status: Some("error"),
@@ -258,7 +258,7 @@ mod tests {
         // freshness frontier it just computed.
         index::upsert_source_state(
             &pool,
-            index::UpsertSourceStateParams {
+            index::NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:00:00Z"),
                 last_sync_status: Some("ok"),
@@ -306,7 +306,7 @@ mod tests {
 
         index::upsert_source_state(
             &pool,
-            index::UpsertSourceStateParams {
+            index::NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-15T10:00:00Z"),
                 last_sync_status: Some("ok"),
@@ -351,7 +351,7 @@ mod tests {
         // 2026-01-10 + 36h buffer).
         index::upsert_source_state(
             &pool,
-            index::UpsertSourceStateParams {
+            index::NewSourceState {
                 source_name: "fitbit",
                 last_sync_at: Some("2026-01-20T10:00:00Z"),
                 last_sync_status: Some("ok"),
@@ -373,7 +373,7 @@ mod tests {
         // A stable, old day: two pulls returned the same sample count.
         index::upsert_source_day_state(
             &pool,
-            index::UpsertSourceDayStateParams {
+            index::NewSourceDayState {
                 source_name: "fitbit",
                 date: "2026-01-10",
                 samples_count: 100,

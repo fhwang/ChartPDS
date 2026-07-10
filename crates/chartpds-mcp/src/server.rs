@@ -395,7 +395,7 @@ impl ChartPdsServer {
                     .unwrap_or_default();
                 chartpds_core::index::upsert_source_credentials(
                     &self.pool,
-                    chartpds_core::index::UpsertSourceCredentialsParams {
+                    chartpds_core::index::NewSourceCredentials {
                         source_name: "oura",
                         credentials_json: &credentials_json,
                         updated_at: &now_str,
@@ -509,7 +509,7 @@ impl ChartPdsServer {
         let result = chartpds_core::queries::duration_in_value_range(
             &self.pool,
             time::OffsetDateTime::now_utc(),
-            chartpds_core::queries::DurationInValueRangeParams {
+            chartpds_core::queries::TimeInRangeQuery {
                 coding_system: &args.coding.system,
                 coding_code: &args.coding.code,
                 start,
@@ -561,7 +561,7 @@ impl ChartPdsServer {
         let result = chartpds_core::queries::longest_continuous_in_value_range(
             &self.pool,
             time::OffsetDateTime::now_utc(),
-            chartpds_core::queries::LongestContinuousParams {
+            chartpds_core::queries::LongestRunQuery {
                 coding_system: &args.coding.system,
                 coding_code: &args.coding.code,
                 start,
@@ -695,8 +695,7 @@ mod tests {
     use super::*;
     use chartpds_core::archive::BlobKey;
     use chartpds_core::index::{
-        insert_observation, insert_source_document, open_pool, InsertObservationParams,
-        InsertSourceDocumentParams,
+        insert_observation, insert_source_document, open_pool, NewObservation, NewSourceDocument,
     };
     use object_store::memory::InMemory;
     use std::sync::Arc;
@@ -726,7 +725,7 @@ mod tests {
         .expect("valid key");
         let doc_id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -739,7 +738,7 @@ mod tests {
         .expect("doc");
         insert_observation(
             &pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id: doc_id,
                 coding_system: "http://loinc.org",
                 coding_code: "29463-7",
@@ -1112,7 +1111,7 @@ mod tests {
         .expect("valid key");
         let doc_id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -1143,7 +1142,7 @@ mod tests {
         ] {
             insert_observation(
                 &pool,
-                InsertObservationParams {
+                NewObservation {
                     source_document_id: doc_id,
                     coding_system: "http://loinc.org",
                     coding_code: "8867-4",
@@ -1235,7 +1234,7 @@ mod tests {
         .expect("valid key");
         let doc_id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -1266,7 +1265,7 @@ mod tests {
         ] {
             insert_observation(
                 &pool,
-                InsertObservationParams {
+                NewObservation {
                     source_document_id: doc_id,
                     coding_system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage",
                     coding_code: "aasm-sleep-stage",

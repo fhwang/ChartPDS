@@ -209,7 +209,7 @@ async fn finish_sync(
     );
     index::upsert_source_state(
         pool,
-        index::UpsertSourceStateParams {
+        index::NewSourceState {
             source_name: "oura",
             last_sync_at: Some(&sync_at),
             last_sync_status: Some("ok"),

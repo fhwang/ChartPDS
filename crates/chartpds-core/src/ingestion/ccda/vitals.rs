@@ -14,7 +14,7 @@ const VITAL_SIGNS_LOINC: &str = "8716-3";
 
 /// A single observation extracted from a CCDA document.
 ///
-/// Field shape mirrors `index::observations::InsertParams` so the ingester
+/// Field shape mirrors `index::observations::NewObservation` so the ingester
 /// can hand off rows without further transformation.
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedObservation {

@@ -28,8 +28,8 @@ pub struct Observation {
     pub value_unit: Option<String>,
 }
 
-/// Parameters for [`insert`].
-pub struct InsertParams<'a> {
+/// An observation ready to be inserted: an [`Observation`] minus its `id`.
+pub struct NewObservation<'a> {
     /// Foreign key into `source_documents`.
     pub source_document_id: i64,
     /// FHIR system URI.
@@ -56,7 +56,10 @@ pub struct InsertParams<'a> {
 ///
 /// Returns `sqlx::Error` if the insert fails (typically a foreign-key
 /// violation on `source_document_id`).
-pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, sqlx::Error> {
+pub async fn insert(
+    pool: &SqlitePool,
+    observation: NewObservation<'_>,
+) -> Result<i64, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         INSERT INTO observations (
@@ -67,15 +70,15 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
-        params.source_document_id,
-        params.coding_system,
-        params.coding_code,
-        params.coding_display,
-        params.effective_start,
-        params.effective_end,
-        params.value_quantity,
-        params.value_string,
-        params.value_unit,
+        observation.source_document_id,
+        observation.coding_system,
+        observation.coding_code,
+        observation.coding_display,
+        observation.effective_start,
+        observation.effective_end,
+        observation.value_quantity,
+        observation.value_string,
+        observation.value_unit,
     )
     .fetch_one(pool)
     .await?;
@@ -128,7 +131,7 @@ pub async fn list_by_source_document(
 mod tests {
     use super::*;
     use crate::archive::BlobKey;
-    use crate::index::{insert_source_document, open_pool, InsertSourceDocumentParams};
+    use crate::index::{insert_source_document, open_pool, NewSourceDocument};
     use time::OffsetDateTime;
 
     async fn fresh_pool_with_doc() -> (sqlx::SqlitePool, i64) {
@@ -144,7 +147,7 @@ mod tests {
         .expect("valid key");
         let id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "test",
@@ -165,7 +168,7 @@ mod tests {
 
         insert(
             &pool,
-            InsertParams {
+            NewObservation {
                 source_document_id: doc_id,
                 coding_system: "http://loinc.org",
                 coding_code: "29463-7",
@@ -194,7 +197,7 @@ mod tests {
 
         insert(
             &pool,
-            InsertParams {
+            NewObservation {
                 source_document_id: doc_id,
                 coding_system: "http://loinc.org",
                 coding_code: "8302-2",

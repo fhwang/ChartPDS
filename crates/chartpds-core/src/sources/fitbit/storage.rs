@@ -131,7 +131,7 @@ async fn index_intraday_day(
     // duplication). Exactly one document per day survives — the newest pull.
     let source_document_id = match index::insert_source_document_superseding(
         pool,
-        index::InsertSourceDocumentParams {
+        index::NewSourceDocument {
             archive_key,
             kind: KIND,
             source: SOURCE,
@@ -153,7 +153,7 @@ async fn index_intraday_day(
     for obs in &observations {
         index::insert_observation(
             pool,
-            index::InsertObservationParams {
+            index::NewObservation {
                 source_document_id,
                 coding_system: "http://loinc.org",
                 coding_code: "8867-4",
@@ -179,7 +179,7 @@ async fn index_intraday_day(
         .unwrap_or_default();
     index::upsert_source_day_state(
         pool,
-        index::UpsertSourceDayStateParams {
+        index::NewSourceDayState {
             source_name: SOURCE,
             date,
             #[allow(

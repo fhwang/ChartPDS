@@ -21,8 +21,8 @@ pub struct Problem {
     pub onset_date: Option<String>,
 }
 
-/// Parameters for [`insert`].
-pub struct InsertParams<'a> {
+/// A problem (diagnosis) ready to be inserted: a [`Problem`] minus its `id`.
+pub struct NewProblem<'a> {
     /// Foreign key into `source_documents`.
     pub source_document_id: i64,
     /// Coding system URI.
@@ -43,7 +43,7 @@ pub struct InsertParams<'a> {
 ///
 /// Returns `sqlx::Error` if the insert fails (typically a foreign-key
 /// violation on `source_document_id`).
-pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, sqlx::Error> {
+pub async fn insert(pool: &SqlitePool, problem: NewProblem<'_>) -> Result<i64, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         INSERT INTO problems (
@@ -53,12 +53,12 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         VALUES (?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
-        params.source_document_id,
-        params.coding_system,
-        params.coding_code,
-        params.coding_display,
-        params.status,
-        params.onset_date,
+        problem.source_document_id,
+        problem.coding_system,
+        problem.coding_code,
+        problem.coding_display,
+        problem.status,
+        problem.onset_date,
     )
     .fetch_one(pool)
     .await?;
@@ -106,7 +106,7 @@ pub async fn list_by_source_document(
 mod tests {
     use super::*;
     use crate::archive::BlobKey;
-    use crate::index::{insert_source_document, open_pool, InsertSourceDocumentParams};
+    use crate::index::{insert_source_document, open_pool, NewSourceDocument};
     use time::OffsetDateTime;
 
     async fn fresh_pool_with_doc() -> (sqlx::SqlitePool, i64) {
@@ -122,7 +122,7 @@ mod tests {
         .expect("valid key");
         let id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &archive_key,
                 kind: "ccda",
                 source: "test",
@@ -142,7 +142,7 @@ mod tests {
 
         insert(
             &pool,
-            InsertParams {
+            NewProblem {
                 source_document_id: doc_id,
                 coding_system: "http://snomed.info/sct",
                 coding_code: "44054006",

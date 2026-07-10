@@ -96,8 +96,8 @@ fn utc_day(ts: OffsetDateTime) -> String {
     )
 }
 
-/// Parameters for [`longest_continuous_in_value_range`].
-pub struct LongestContinuousParams<'a> {
+/// A longest-continuous-run question: the longest in-range run per day.
+pub struct LongestRunQuery<'a> {
     /// FHIR coding system URI.
     pub coding_system: &'a str,
     /// Coding code within `coding_system`.
@@ -129,10 +129,10 @@ pub struct LongestContinuousParams<'a> {
 pub async fn longest_continuous_in_value_range(
     pool: &SqlitePool,
     now: OffsetDateTime,
-    params: LongestContinuousParams<'_>,
+    query: LongestRunQuery<'_>,
 ) -> Result<LongestContinuousInRange, sqlx::Error> {
-    let by_day = longest_by_day(pool, &params).await?;
-    let confidence_by_bucket = bucket_confidence_for(pool, now, &params).await?;
+    let by_day = longest_by_day(pool, &query).await?;
+    let confidence_by_bucket = bucket_confidence_for(pool, now, &query).await?;
 
     Ok(LongestContinuousInRange {
         per_bucket: by_day
@@ -157,9 +157,9 @@ pub async fn longest_continuous_in_value_range(
 /// before per-bucket confidence was added.
 async fn longest_by_day(
     pool: &SqlitePool,
-    params: &LongestContinuousParams<'_>,
+    query: &LongestRunQuery<'_>,
 ) -> Result<BTreeMap<String, f64>, sqlx::Error> {
-    let &LongestContinuousParams {
+    let &LongestRunQuery {
         coding_system,
         coding_code,
         start,
@@ -167,7 +167,7 @@ async fn longest_by_day(
         value_min,
         value_max,
         gap_seconds,
-    } = params;
+    } = query;
     let rows = sqlx::query!(
         r#"
         SELECT effective_start AS "effective_start: OffsetDateTime",
@@ -216,9 +216,9 @@ async fn longest_by_day(
 async fn bucket_confidence_for(
     pool: &SqlitePool,
     now: OffsetDateTime,
-    params: &LongestContinuousParams<'_>,
+    query: &LongestRunQuery<'_>,
 ) -> Result<std::collections::HashMap<String, DayConfidence>, sqlx::Error> {
-    let &LongestContinuousParams {
+    let &LongestRunQuery {
         coding_system,
         coding_code,
         start,
@@ -226,7 +226,7 @@ async fn bucket_confidence_for(
         value_min,
         value_max,
         gap_seconds: _,
-    } = params;
+    } = query;
     let contributions = crate::queries::day_confidence::contributions_for_filter(
         pool,
         coding_system,
@@ -344,7 +344,7 @@ mod tests {
         let result = longest_continuous_in_value_range(
             &pool,
             datetime!(2026-06-01 00:00:00 UTC),
-            LongestContinuousParams {
+            LongestRunQuery {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
                 start: datetime!(2026-01-01 00:00:00 UTC),
@@ -400,7 +400,7 @@ mod tests {
         let result = longest_continuous_in_value_range(
             &pool,
             datetime!(2026-06-01 00:00:00 UTC),
-            LongestContinuousParams {
+            LongestRunQuery {
                 coding_system: AASM_SLEEP_STAGE_SYSTEM,
                 coding_code: AASM_SLEEP_STAGE_CODE,
                 start: datetime!(2026-01-01 00:00:00 UTC),

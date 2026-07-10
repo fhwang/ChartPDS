@@ -118,7 +118,7 @@ async fn exchange_and_store(
 
     chartpds_core::index::upsert_source_credentials(
         pool,
-        chartpds_core::index::UpsertSourceCredentialsParams {
+        chartpds_core::index::NewSourceCredentials {
             source_name: "fitbit",
             credentials_json: &credentials_json,
             updated_at: &now_str,

@@ -26,12 +26,11 @@ pub use day_confidence::{
 };
 pub use duration_in_value_range::{
     duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInRangeError,
-    DurationInValueRangeParams,
+    TimeInRangeQuery,
 };
 pub use latest_by_code::latest_by_code;
 pub use list_notifications::list_recent_notifications;
 pub use longest_continuous_in_value_range::{
-    longest_continuous_in_value_range, BucketLongest, LongestContinuousInRange,
-    LongestContinuousParams,
+    longest_continuous_in_value_range, BucketLongest, LongestContinuousInRange, LongestRunQuery,
 };
 pub use observation_history::{observation_history, CodingKey};

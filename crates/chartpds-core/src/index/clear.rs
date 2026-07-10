@@ -27,7 +27,7 @@ mod tests {
     use crate::archive::BlobKey;
     use crate::index::{
         insert_observation, insert_source_document, open_pool, upsert_source_credentials,
-        InsertObservationParams, InsertSourceDocumentParams, UpsertSourceCredentialsParams,
+        NewObservation, NewSourceCredentials, NewSourceDocument,
     };
     use time::macros::datetime;
     use time::OffsetDateTime;
@@ -51,7 +51,7 @@ mod tests {
 
         let doc_id = insert_source_document(
             &pool,
-            InsertSourceDocumentParams {
+            NewSourceDocument {
                 archive_key: &key,
                 kind: "ccda",
                 source: "test",
@@ -65,7 +65,7 @@ mod tests {
 
         insert_observation(
             &pool,
-            InsertObservationParams {
+            NewObservation {
                 source_document_id: doc_id,
                 coding_system: "http://loinc.org",
                 coding_code: "29463-7",
@@ -83,7 +83,7 @@ mod tests {
         // Also insert source_credentials to verify it survives.
         upsert_source_credentials(
             &pool,
-            UpsertSourceCredentialsParams {
+            NewSourceCredentials {
                 source_name: "fitbit",
                 credentials_json: r#"{"token":"abc"}"#,
                 updated_at: "2026-01-15T10:00:00Z",

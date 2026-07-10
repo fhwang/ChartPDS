@@ -17,8 +17,8 @@ pub struct SourceDayState {
     pub last_pulled_at: String,
 }
 
-/// Parameters for [`upsert`].
-pub struct UpsertParams<'a> {
+/// One source-day of pull bookkeeping, ready to be written.
+pub struct NewSourceDayState<'a> {
     /// Source name.
     pub source_name: &'a str,
     /// ISO-8601 date string.
@@ -38,7 +38,10 @@ pub struct UpsertParams<'a> {
 /// # Errors
 ///
 /// Returns `sqlx::Error` if the upsert fails.
-pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), sqlx::Error> {
+pub async fn upsert(
+    pool: &SqlitePool,
+    day_state: NewSourceDayState<'_>,
+) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO source_day_state (source_name, date, samples_count, samples_count_prev, last_pulled_at)
@@ -48,11 +51,11 @@ pub async fn upsert(pool: &SqlitePool, params: UpsertParams<'_>) -> Result<(), s
             samples_count_prev = excluded.samples_count_prev,
             last_pulled_at = excluded.last_pulled_at
         "#,
-        params.source_name,
-        params.date,
-        params.samples_count,
-        params.samples_count_prev,
-        params.last_pulled_at,
+        day_state.source_name,
+        day_state.date,
+        day_state.samples_count,
+        day_state.samples_count_prev,
+        day_state.last_pulled_at,
     )
     .execute(pool)
     .await?;
@@ -154,7 +157,7 @@ mod tests {
 
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceDayState {
                 source_name: "fitbit",
                 date: "2026-01-15",
                 samples_count: 42,
@@ -167,7 +170,7 @@ mod tests {
 
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceDayState {
                 source_name: "fitbit",
                 date: "2026-01-16",
                 samples_count: 50,
@@ -198,7 +201,7 @@ mod tests {
         // Upserting the same key replaces the row.
         upsert(
             &pool,
-            UpsertParams {
+            NewSourceDayState {
                 source_name: "fitbit",
                 date: "2026-01-15",
                 samples_count: 45,
