@@ -29,6 +29,10 @@ pub struct CurrentProblem {
     pub first_seen: Option<String>,
     /// Latest `document_date` mentioning this code.
     pub last_seen: Option<String>,
+    /// Distinct verbatim section headings this code appeared under in
+    /// narrative documents (e.g. `["Pre-Op Diagnosis/Indications"]`).
+    /// Empty when the code only comes from CCDA problem sections.
+    pub section_labels: Vec<String>,
 }
 
 /// Deduped current problems plus the newest document date in the archive.
@@ -91,17 +95,43 @@ pub async fn current_problems(pool: &SqlitePool) -> Result<CurrentProblems, sqlx
     .fetch_all(pool)
     .await?;
 
+    let label_rows = sqlx::query!(
+        r#"
+        SELECT DISTINCT coding_system AS "coding_system!", coding_code AS "coding_code!",
+               section_label AS "section_label!"
+        FROM problems
+        WHERE section_label IS NOT NULL
+        ORDER BY coding_system, coding_code, section_label
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut labels: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
+    for r in label_rows {
+        labels
+            .entry((r.coding_system, r.coding_code))
+            .or_default()
+            .push(r.section_label);
+    }
+
     let items = rows
         .into_iter()
-        .map(|r| CurrentProblem {
-            coding_system: r.coding_system,
-            coding_code: r.coding_code,
-            coding_display: r.coding_display,
-            status: r.status,
-            onset_date: r.onset_date,
-            document_count: r.document_count,
-            first_seen: r.first_seen,
-            last_seen: r.last_seen,
+        .map(|r| {
+            let section_labels = labels
+                .remove(&(r.coding_system.clone(), r.coding_code.clone()))
+                .unwrap_or_default();
+            CurrentProblem {
+                coding_system: r.coding_system,
+                coding_code: r.coding_code,
+                coding_display: r.coding_display,
+                status: r.status,
+                onset_date: r.onset_date,
+                document_count: r.document_count,
+                first_seen: r.first_seen,
+                last_seen: r.last_seen,
+                section_labels,
+            }
         })
         .collect();
 
@@ -172,6 +202,7 @@ mod tests {
                     coding_display: Some("Type 2 diabetes mellitus"),
                     status,
                     onset_date: Some("2020-03-15"),
+                    section_label: None,
                 },
             )
             .await
@@ -228,6 +259,7 @@ mod tests {
                 coding_display: Some("Diabetes mellitus"),
                 status: "active",
                 onset_date: Some("2020-01-01"),
+                section_label: None,
             },
         )
         .await
@@ -241,6 +273,7 @@ mod tests {
                 coding_display: Some("Diabetes mellitus"),
                 status: "resolved",
                 onset_date: None,
+                section_label: None,
             },
         )
         .await
@@ -273,6 +306,7 @@ mod tests {
                     coding_display: Some("Diabetes mellitus"),
                     status: "active",
                     onset_date: Some(onset),
+                    section_label: None,
                 },
             )
             .await
@@ -283,5 +317,44 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         // One document, even though two rows were inserted.
         assert_eq!(result.items[0].document_count, 1);
+    }
+
+    #[tokio::test]
+    async fn section_labels_are_collected_distinct() {
+        let pool = pool().await;
+        let d = doc(
+            &pool,
+            "4444444444444444444444444444444444444444444444444444444444444444",
+            "2026-04-21",
+        )
+        .await;
+        for label in [
+            "Pre-Op Diagnosis/Indications",
+            "Post-Op Diagnosis/ICD Codes",
+        ] {
+            insert_problem(
+                &pool,
+                InsertProblemParams {
+                    source_document_id: d,
+                    coding_system: "http://hl7.org/fhir/sid/icd-10-cm",
+                    coding_code: "R10.9",
+                    coding_display: Some("Abdominal pain, unspecified"),
+                    status: "unknown",
+                    onset_date: Some("2026-04-21"),
+                    section_label: Some(label),
+                },
+            )
+            .await
+            .expect("problem");
+        }
+        let result = current_problems(&pool).await.expect("query");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(
+            result.items[0].section_labels,
+            vec![
+                "Post-Op Diagnosis/ICD Codes".to_string(),
+                "Pre-Op Diagnosis/Indications".to_string()
+            ]
+        );
     }
 }

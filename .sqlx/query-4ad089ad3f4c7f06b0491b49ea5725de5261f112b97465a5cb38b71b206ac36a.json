@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE source_documents SET document_date = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4ad089ad3f4c7f06b0491b49ea5725de5261f112b97465a5cb38b71b206ac36a"
+}

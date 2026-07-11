@@ -29,6 +29,15 @@ pub enum Error {
     /// rebuild.
     #[error("adapter replay failed")]
     Adapter(#[source] crate::sources::Error),
+
+    /// PDF text extraction or LLM extraction failed fatally.
+    ///
+    /// The cause is inlined into the message (not a `#[source]` chain)
+    /// because the MCP layer surfaces errors via plain `Display` — the
+    /// caller needs the underlying reason (e.g. the HTTP status of an LLM
+    /// outage) to decide whether re-running the ingest is worthwhile.
+    #[error("narrative extraction failed: {0}")]
+    Extraction(crate::extraction::Error),
 }
 
 impl From<crate::sources::Error> for Error {
@@ -52,6 +61,12 @@ impl From<crate::archive::Error> for Error {
 impl From<sqlx::Error> for Error {
     fn from(err: sqlx::Error) -> Self {
         Self::Database(err)
+    }
+}
+
+impl From<crate::extraction::Error> for Error {
+    fn from(err: crate::extraction::Error) -> Self {
+        Self::Extraction(err)
     }
 }
 

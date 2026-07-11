@@ -33,13 +33,19 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
 
-    // Create the data directory and archive subdirectory.
+    // Create the data directory and its archive + derived subdirectories.
     std::fs::create_dir_all(config.data_dir())
         .with_context(|| format!("creating data directory {}", config.data_dir().display()))?;
     std::fs::create_dir_all(config.archive_path()).with_context(|| {
         format!(
             "creating archive directory {}",
             config.archive_path().display()
+        )
+    })?;
+    std::fs::create_dir_all(config.derived_path()).with_context(|| {
+        format!(
+            "creating derived-store directory {}",
+            config.derived_path().display()
         )
     })?;
 
@@ -54,6 +60,14 @@ async fn main() -> Result<()> {
         )
     })?;
     let archive = Archive::new(Arc::new(local_fs));
+    let derived_fs =
+        LocalFileSystem::new_with_prefix(config.derived_path()).with_context(|| {
+            format!(
+                "opening local derived store at {}",
+                config.derived_path().display()
+            )
+        })?;
+    let derived = Archive::new(Arc::new(derived_fs));
 
     let oauth_config = match (
         config.google_health_client_id,
@@ -72,6 +86,7 @@ async fn main() -> Result<()> {
     let server = ChartPdsServer::new(
         pool.clone(),
         archive.clone(),
+        derived,
         oauth_config.clone(),
         http_client.clone(),
     );
