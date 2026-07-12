@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Synthetic CCDA fixture for the ChartPDS holdout regression suite.
+  Entirely fabricated test data: no real patient, no PHI.
+
+  Three body-weight vitals chosen so observation_stats has exact,
+  hand-checkable answers:
+    - values 380 / 400 / 420 -> mean 400, sample sd 20, p25 390,
+      p50 400, p75 410 (R type-7 linear interpolation)
+    - all three at 02:16 UTC, which is 21:16 EST (America/New_York,
+      January = standard time) -> start_time_of_day is 556 minutes
+      since local noon, not the 616 an EDT-offset bug would produce
+-->
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <templateId root="2.16.840.1.113883.10.20.22.1.1" extension="2015-08-01"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.2" extension="2015-08-01"/>
+  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1" displayName="Summary of episode note"/>
+  <title>Holdout Synthetic Observation Stats Vitals</title>
+  <effectiveTime value="20260117120000+0000"/>
+  <component>
+    <structuredBody>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.4.1" extension="2015-08-01"/>
+          <code code="8716-3" codeSystem="2.16.840.1.113883.6.1" displayName="Vital signs"/>
+          <title>Vital Signs</title>
+          <entry>
+            <organizer classCode="CLUSTER" moodCode="EVN">
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260115021600+0000"/>
+                  <value xsi:type="PQ" value="380" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260116021600+0000"/>
+                  <value xsi:type="PQ" value="400" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260117021600+0000"/>
+                  <value xsi:type="PQ" value="420" unit="[lb_av]"/>
+                </observation>
+              </component>
+            </organizer>
+          </entry>
+        </section>
+      </component>
+    </structuredBody>
+  </component>
+</ClinicalDocument>

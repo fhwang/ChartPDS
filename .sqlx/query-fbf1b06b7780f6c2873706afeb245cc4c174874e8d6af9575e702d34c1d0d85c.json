@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT o.effective_start AS \"effective_start!: OffsetDateTime\",\n               o.effective_end AS \"effective_end?: OffsetDateTime\",\n               o.value_quantity AS \"value_quantity?: f64\",\n               sd.source AS \"source!: String\",\n               sd.document_date AS \"document_date?: String\"\n        FROM observations o\n        JOIN source_documents sd ON o.source_document_id = sd.id\n        WHERE o.coding_system = ?\n          AND o.coding_code = ?\n          AND o.effective_start >= ?\n          AND o.effective_start < ?\n        ORDER BY o.effective_start\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "effective_start!: OffsetDateTime",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_end?: OffsetDateTime",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "value_quantity?: f64",
+        "ordinal": 2,
+        "type_info": "Float"
+      },
+      {
+        "name": "source!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "document_date?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "fbf1b06b7780f6c2873706afeb245cc4c174874e8d6af9575e702d34c1d0d85c"
+}

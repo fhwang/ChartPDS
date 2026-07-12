@@ -15,6 +15,7 @@ mod latest_by_code;
 mod list_notifications;
 mod longest_continuous_in_value_range;
 mod observation_history;
+mod observation_stats;
 mod search_narratives;
 #[cfg(test)]
 mod test_support;
@@ -38,4 +39,8 @@ pub use longest_continuous_in_value_range::{
     LongestContinuousParams,
 };
 pub use observation_history::{observation_history, CodingKey};
+pub use observation_stats::{
+    observation_stats, BucketStats, ObservationStats, ObservationStatsError,
+    ObservationStatsParams, StatsBucket, StatsField, StatsSummary, ThresholdCount,
+};
 pub use search_narratives::{search_narratives, NarrativeSearchHit};

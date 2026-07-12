@@ -228,8 +228,8 @@ and the reasons in `rejected`.)
 `queries::` holds generic analytical primitives over the index.
 Currently: `latest_by_code`, `observation_history`, `counts_per_code`,
 `current_problems`, `current_medications`, `duration_in_value_range`,
-`longest_continuous_in_value_range`, `search_narratives`, `get_narrative`.
-Each is a pure async function
+`longest_continuous_in_value_range`, `search_narratives`, `get_narrative`,
+`observation_stats`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
 The `current_problems` and `current_medications` primitives return deduped
@@ -261,7 +261,7 @@ cache the new SQL.
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
 e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`,
 the local-FS archive at `$DIR/archive/`, and the derived store at
-`$DIR/derived/`, and serves 15 tools:
+`$DIR/derived/`, and serves 16 tools:
 
 - `ingest_record` — ingest a document (write path); `kind="ccda"` for CCDA
   XML, `kind="clinical-pdf"` for a narrative clinical PDF (see Narrative
@@ -277,6 +277,11 @@ the local-FS archive at `$DIR/archive/`, and the derived store at
   (non-standard only; LOINC omitted as self-describing)
 - `observation_duration_in_range` — total minutes a coded signal spent in a value range
 - `observation_longest_period_in_range` — longest continuous in-range run per day
+- `observation_stats` — descriptive statistics (count, mean, sample sd,
+  min/max, p25/p50/p75, optional threshold counts) for one coding over a
+  window; `field` selects `value`, `start_time_of_day` / `end_time_of_day`
+  (minutes since local noon), or `interval_minutes`; optional bucketing by
+  `day` / `week` (ISO Monday) / `month` / `day_of_week` in a request timezone
 - `list_problems` — current problems (diagnoses), deduped to one entry per
   code with provenance (`document_count`, `first_seen`, `last_seen`) and the
   archive's `latest_document_date`; `status` is the raw source value and is

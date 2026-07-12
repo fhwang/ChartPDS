@@ -147,6 +147,29 @@ pub(crate) struct ObservationLongestPeriodInRangeArgs {
     pub(crate) gap_seconds: Option<i64>,
 }
 
+/// Arguments for the `observation_stats` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct ObservationStatsArgs {
+    /// Coding to aggregate over.
+    pub(crate) coding: Coding,
+    /// Inclusive start of the time window (RFC 3339).
+    pub(crate) start: String,
+    /// Exclusive end of the time window (RFC 3339).
+    pub(crate) end: String,
+    /// Field to aggregate: `"value"` (default), `"start_time_of_day"`,
+    /// `"end_time_of_day"` (minutes since local noon, `[0, 1440)`), or
+    /// `"interval_minutes"`.
+    pub(crate) field: Option<String>,
+    /// Bucketing: `"none"` (default), `"day"`, `"week"` (ISO, keyed by
+    /// Monday), `"month"`, or `"day_of_week"` (`mon` … `sun`).
+    pub(crate) bucket: Option<String>,
+    /// IANA timezone (e.g. `"America/New_York"`) governing bucket
+    /// boundaries and time-of-day derivation. Omit for UTC.
+    pub(crate) timezone: Option<String>,
+    /// Optional thresholds; each reports counts below / at-or-above.
+    pub(crate) thresholds: Option<Vec<f64>>,
+}
+
 /// `ChartPDS` MCP server.
 ///
 /// Holds the shared `SqlitePool`, the source-bytes [`Archive`], the derived
@@ -619,6 +642,77 @@ impl ChartPdsServer {
         )
         .await
         .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+
+        let json = serde_json::to_string(&result)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Descriptive statistics (count, mean, sample sd, min/max, p25/p50/p75, optional threshold counts) for one coding's observations over a window. Args: coding {system, code}, start/end (RFC 3339, half-open), field (\"value\" default | \"start_time_of_day\" | \"end_time_of_day\" | \"interval_minutes\"; time-of-day fields are minutes since local noon in [0,1440) so overnight timings stay linear, e.g. 22:16 -> 616), bucket (\"none\" default | \"day\" | \"week\" ISO keyed by Monday | \"month\" | \"day_of_week\" mon..sun), timezone (IANA name, default UTC; governs bucket boundaries and time-of-day), thresholds (numbers; each reports n_below / n_at_or_above, n_below is strictly-less). Observations lacking the field are excluded and count reflects rows aggregated. bucket \"none\" returns one flat stats object (all stats null when count 0); otherwise {per_bucket:[{bucket_key, ...}]} with empty buckets omitted. sd is the sample sd (null when count < 2). confidence is \"provisional\" if any aggregated observation is provisional, else \"confirmed\"."
+    )]
+    async fn observation_stats(
+        &self,
+        Parameters(args): Parameters<ObservationStatsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let start = time::OffsetDateTime::parse(&args.start, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
+        let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
+        let field = match args.field.as_deref() {
+            None | Some("value") => chartpds_core::queries::StatsField::Value,
+            Some("start_time_of_day") => chartpds_core::queries::StatsField::StartTimeOfDay,
+            Some("end_time_of_day") => chartpds_core::queries::StatsField::EndTimeOfDay,
+            Some("interval_minutes") => chartpds_core::queries::StatsField::IntervalMinutes,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "invalid field {other:?}; expected \"value\", \"start_time_of_day\", \"end_time_of_day\", or \"interval_minutes\""
+                    ),
+                    None,
+                ))
+            }
+        };
+        let bucket = match args.bucket.as_deref() {
+            None | Some("none") => chartpds_core::queries::StatsBucket::None,
+            Some("day") => chartpds_core::queries::StatsBucket::Day,
+            Some("week") => chartpds_core::queries::StatsBucket::Week,
+            Some("month") => chartpds_core::queries::StatsBucket::Month,
+            Some("day_of_week") => chartpds_core::queries::StatsBucket::DayOfWeek,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "invalid bucket {other:?}; expected \"none\", \"day\", \"week\", \"month\", or \"day_of_week\""
+                    ),
+                    None,
+                ))
+            }
+        };
+
+        let result = chartpds_core::queries::observation_stats(
+            &self.pool,
+            time::OffsetDateTime::now_utc(),
+            chartpds_core::queries::ObservationStatsParams {
+                coding_system: &args.coding.system,
+                coding_code: &args.coding.code,
+                start,
+                end,
+                field,
+                bucket,
+                timezone: args.timezone.as_deref(),
+                thresholds: args.thresholds.as_deref(),
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            chartpds_core::queries::ObservationStatsError::InvalidTimezone(_) => {
+                McpError::invalid_params(err.to_string(), None)
+            }
+            chartpds_core::queries::ObservationStatsError::Db(_)
+            | chartpds_core::queries::ObservationStatsError::Internal(_) => {
+                McpError::internal_error(format!("query failed: {err}"), None)
+            }
+        })?;
 
         let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
@@ -1399,6 +1493,158 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["bucket_start"], "2026-01-01");
         assert_eq!(arr[0]["longest_minutes"], 10.0);
+    }
+
+    /// Three nightly total-sleep observations: 400, 420, 380 minutes.
+    async fn fresh_server_with_nightly_sleep() -> ChartPdsServer {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+
+        let key = BlobKey::from_hex_str(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect("valid key");
+        let doc_id = insert_source_document(
+            &pool,
+            InsertSourceDocumentParams {
+                archive_key: &key,
+                kind: "ccda",
+                source: "test",
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
+            },
+        )
+        .await
+        .expect("doc");
+        for (start, minutes) in [
+            (datetime!(2026-01-01 07:00:00 UTC), 400.0),
+            (datetime!(2026-01-02 07:00:00 UTC), 420.0),
+            (datetime!(2026-01-03 07:00:00 UTC), 380.0),
+        ] {
+            insert_observation(
+                &pool,
+                InsertObservationParams {
+                    source_document_id: doc_id,
+                    coding_system: "http://loinc.org",
+                    coding_code: "93832-4",
+                    coding_display: Some("Sleep duration"),
+                    effective_start: start,
+                    effective_end: None,
+                    value_quantity: Some(minutes),
+                    value_string: None,
+                    value_unit: Some("min"),
+                },
+            )
+            .await
+            .expect("obs");
+        }
+
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
+    }
+
+    fn stats_args() -> ObservationStatsArgs {
+        ObservationStatsArgs {
+            coding: Coding {
+                system: "http://loinc.org".to_string(),
+                code: "93832-4".to_string(),
+            },
+            start: "2026-01-01T00:00:00Z".to_string(),
+            end: "2026-02-01T00:00:00Z".to_string(),
+            field: None,
+            bucket: None,
+            timezone: None,
+            thresholds: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_stats_flat_defaults_to_value_field() {
+        let server = fresh_server_with_nightly_sleep().await;
+        let result = server
+            .observation_stats(Parameters(stats_args()))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["p50"], 400.0);
+        assert_eq!(value["min"], 380.0);
+        assert_eq!(value["max"], 420.0);
+        assert_eq!(value["confidence"], "confirmed");
+        // No thresholds requested → key omitted.
+        assert!(value.get("thresholds").is_none());
+    }
+
+    #[tokio::test]
+    async fn observation_stats_reports_thresholds() {
+        let server = fresh_server_with_nightly_sleep().await;
+        let mut args = stats_args();
+        args.thresholds = Some(vec![400.0]);
+        let result = server
+            .observation_stats(Parameters(args))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(value["thresholds"][0]["threshold"], 400.0);
+        assert_eq!(value["thresholds"][0]["n_below"], 1);
+        assert_eq!(value["thresholds"][0]["n_at_or_above"], 2);
+    }
+
+    #[tokio::test]
+    async fn observation_stats_day_of_week_bucket_shape() {
+        let server = fresh_server_with_nightly_sleep().await;
+        let mut args = stats_args();
+        args.bucket = Some("day_of_week".to_string());
+        let result = server
+            .observation_stats(Parameters(args))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        // Jan 1/2/3 2026 are Thu/Fri/Sat → three buckets, Monday-first order.
+        let keys: Vec<&str> = value["per_bucket"]
+            .as_array()
+            .expect("per_bucket array")
+            .iter()
+            .map(|b| b["bucket_key"].as_str().expect("key"))
+            .collect();
+        assert_eq!(keys, vec!["thu", "fri", "sat"]);
+    }
+
+    #[tokio::test]
+    async fn observation_stats_rejects_unknown_field_and_bucket() {
+        let server = fresh_server_with_nightly_sleep().await;
+        let mut args = stats_args();
+        args.field = Some("nope".to_string());
+        let err = server
+            .observation_stats(Parameters(args))
+            .await
+            .expect_err("unknown field");
+        assert!(err.to_string().contains("invalid field"));
+
+        let mut args = stats_args();
+        args.bucket = Some("hour".to_string());
+        let err = server
+            .observation_stats(Parameters(args))
+            .await
+            .expect_err("unknown bucket");
+        assert!(err.to_string().contains("invalid bucket"));
     }
 
     #[tokio::test]
