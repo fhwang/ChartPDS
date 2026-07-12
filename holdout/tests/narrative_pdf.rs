@@ -13,11 +13,18 @@
 //!    searchable text, title, document date, and verified codings in
 //!    `problems` — from the archive alone, with no `ANTHROPIC_API_KEY` in the
 //!    environment.
-//! 2. **Degraded re-ingest must not destroy verified extraction state.** Found
-//!    live before merge: re-ingesting already-indexed bytes while extraction
-//!    was unavailable deleted the document row, cascading away previously
-//!    verified codings, title, and date. The archive still held the artifact,
-//!    so live state silently diverged from what a rebuild would produce.
+//! 2. **A keyless ingest fails cleanly, persisting nothing.** Extraction is
+//!    required: with no `ANTHROPIC_API_KEY` the ingest errors up front,
+//!    naming the missing configuration, and leaves no archive blob or index
+//!    rows behind. Found live: a missing key silently produced a text-only
+//!    document with no codings, no title, and no date — reported only via an
+//!    in-band status that automated callers never read.
+//! 3. **A keyless re-ingest must not destroy verified extraction state.**
+//!    Found live before merge (as the then-"degraded re-ingest" path):
+//!    re-ingesting already-indexed bytes while extraction was unavailable
+//!    deleted the document row, cascading away previously verified codings,
+//!    title, and date. Now the re-ingest fails outright — and the prior
+//!    verified state must survive that failure intact.
 //!
 //! The fixture PDF is synthetic (invented patient/provider, generic codes);
 //! its artifact was frozen from a canned extraction, not a live model call.
@@ -127,40 +134,102 @@ async fn rebuild_replays_narrative_pdf_and_frozen_artifact_without_llm() {
     assert_codings_indexed(&server, "after rebuild").await;
 }
 
-/// Re-ingesting the same PDF bytes while extraction is unavailable (no API
-/// key) must preserve the previously applied extraction state — codings,
-/// title, and date survive; nothing is deleted. Encodes the pre-merge live
-/// bug where this path silently destroyed verified codings.
-#[tokio::test]
-async fn degraded_reingest_preserves_verified_extraction() {
-    let server = Harness::start().await;
-    seed_and_rebuild(&server).await;
-    assert_codings_indexed(&server, "before re-ingest").await;
-
-    // Re-ingest the identical bytes. The harness strips ANTHROPIC_API_KEY, so
-    // this is the degraded (no-extractor) path.
-    let fixture_pdf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// Absolute path to the fixture PDF blob, for `ingest_record` calls.
+fn fixture_pdf_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
         .join("narrative_pdf")
-        .join(PDF_HASH);
-    let outcome = server
-        .call_tool(
+        .join(PDF_HASH)
+}
+
+/// Ingesting a narrative PDF with no `ANTHROPIC_API_KEY` must fail cleanly:
+/// the error names the missing configuration, and nothing is persisted — no
+/// searchable text, no archive blob for a rebuild to resurrect. Encodes the
+/// live bug where a missing key silently ingested a text-only document with
+/// no codings.
+#[tokio::test]
+async fn keyless_ingest_fails_cleanly_with_nothing_persisted() {
+    let server = Harness::start().await;
+
+    let err = server
+        .try_call_tool(
             "ingest_record",
             serde_json::json!({
                 "kind": "clinical-pdf",
                 "source": "holdout",
-                "file_path": fixture_pdf.to_str().expect("utf-8 fixture path"),
+                "file_path": fixture_pdf_path().to_str().expect("utf-8 fixture path"),
             }),
+        )
+        .await
+        .expect_err("keyless clinical-pdf ingest must fail");
+    assert!(
+        err.contains("ANTHROPIC_API_KEY"),
+        "error must name the missing configuration: {err}"
+    );
+
+    // Nothing searchable was left behind.
+    let hits = server
+        .call_tool(
+            "search_narratives",
+            serde_json::json!({ "query": "dysplasia" }),
         )
         .await;
     assert_eq!(
-        outcome["extraction_status"], "skipped_no_extractor",
-        "harness must be hermetic (no API key): {outcome}"
+        hits.as_array().expect("hits array").len(),
+        0,
+        "failed ingest must leave no searchable text: {hits}"
     );
 
-    // The previously verified state must survive intact.
-    assert_codings_indexed(&server, "after degraded re-ingest").await;
-    let doc_id = outcome["source_document_id"].as_i64().expect("document id");
+    // Nothing was archived either: a rebuild finds no narrative to replay.
+    let rebuild = server
+        .call_tool("rebuild_index", serde_json::Value::Null)
+        .await;
+    assert_eq!(
+        rebuild["narratives_ingested"], 0,
+        "failed ingest must leave no archive blob: {rebuild}"
+    );
+}
+
+/// Re-ingesting the same PDF bytes while extraction is unavailable (no API
+/// key) fails the ingest — and must preserve the previously applied
+/// extraction state: codings, title, and date survive; nothing is deleted.
+/// Encodes the pre-merge live bug where this path silently destroyed
+/// verified codings.
+#[tokio::test]
+async fn keyless_reingest_fails_and_preserves_verified_extraction() {
+    let server = Harness::start().await;
+    seed_and_rebuild(&server).await;
+    assert_codings_indexed(&server, "before re-ingest").await;
+
+    // Re-ingest the identical bytes. The harness strips ANTHROPIC_API_KEY,
+    // so extraction cannot run and the ingest must fail.
+    let err = server
+        .try_call_tool(
+            "ingest_record",
+            serde_json::json!({
+                "kind": "clinical-pdf",
+                "source": "holdout",
+                "file_path": fixture_pdf_path().to_str().expect("utf-8 fixture path"),
+            }),
+        )
+        .await
+        .expect_err("keyless clinical-pdf re-ingest must fail");
+    assert!(
+        err.contains("ANTHROPIC_API_KEY"),
+        "error must name the missing configuration: {err}"
+    );
+
+    // The previously verified state must survive the failed re-ingest.
+    assert_codings_indexed(&server, "after failed re-ingest").await;
+    let hits = server
+        .call_tool(
+            "search_narratives",
+            serde_json::json!({ "query": "dysplasia" }),
+        )
+        .await;
+    let hits = hits.as_array().expect("hits array");
+    assert_eq!(hits.len(), 1, "document must still be indexed: {hits:?}");
+    let doc_id = hits[0]["source_document_id"].as_i64().expect("document id");
     let detail = server
         .call_tool(
             "get_narrative",
@@ -169,15 +238,15 @@ async fn degraded_reingest_preserves_verified_extraction() {
         .await;
     assert_eq!(
         detail["title"], "GI Pathology Report — colon biopsy",
-        "title must survive degraded re-ingest: {detail}"
+        "title must survive failed re-ingest: {detail}"
     );
     assert_eq!(
         detail["document_date"], "2026-04-21",
-        "document date must survive degraded re-ingest: {detail}"
+        "document date must survive failed re-ingest: {detail}"
     );
     assert_eq!(
         detail["codings"].as_array().expect("codings").len(),
         3,
-        "codings must survive degraded re-ingest: {detail}"
+        "codings must survive failed re-ingest: {detail}"
     );
 }
