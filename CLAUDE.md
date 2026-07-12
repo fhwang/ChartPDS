@@ -184,10 +184,11 @@ report, visit note) instead of structured CCDA. `ingestion::ingest_narrative_pdf
 is the orchestrator: deterministic text extraction (`extraction::extract_pdf_text`,
 via `pdf-extract`) runs first and unconditionally — a scanned PDF with no text
 layer is a hard error (`Error::NoTextLayer`) before anything is archived;
-OCR is out of scope. If `ANTHROPIC_API_KEY` is set, a one-time LLM pass
+OCR is out of scope. A one-time LLM pass
 (`extraction::ClaudeExtractor`, model pinned in `extraction/llm.rs` as
-`EXTRACTION_MODEL`) extracts explicitly-quoted ICD-10-CM codes and a document
-date. `ANTHROPIC_BASE_URL` optionally overrides the API endpoint (same
+`EXTRACTION_MODEL`) then extracts explicitly-quoted ICD-10-CM codes and a
+document date; it requires `ANTHROPIC_API_KEY` — there is no text-only
+fallback (see the failure-handling paragraph below). `ANTHROPIC_BASE_URL` optionally overrides the API endpoint (same
 variable the official Anthropic SDKs honor — for proxies/gateways, and how
 the holdout suite points the binary at a local mock LLM server). LLM output is never trusted directly: `extraction::verify_extraction`
 mechanically checks every claim against the extracted text (whitespace-
@@ -208,18 +209,19 @@ Verified codings land in `problems` alongside CCDA-derived ones, with
 appeared under in the source document (NULL for CCDA rows — it's
 presentational provenance for an LLM reader, not machine-aggregatable).
 
-Extraction failure handling distinguishes "no extractor" from "extractor
-failed". With no `ANTHROPIC_API_KEY`, ingestion degrades gracefully to a
-text-only narrative (`extraction_status: "skipped_no_extractor"`); every
-claim failing verification still applies as an empty extraction
-(`"applied"` with zero codings). But an LLM *failure* fails the whole
-ingest: `ClaudeExtractor` retries transient failures in-band (3 attempts
-total; connection errors and HTTP 429/5xx, with short linear backoff —
-see `MAX_ATTEMPTS` in `extraction/llm.rs`), and a sustained outage then
-errors the `ingest_record` call before anything is archived or indexed.
-Nothing is persisted, so there is no partial text-only state to reconcile
-and nothing for `rebuild_index` to resurrect — the caller simply re-runs
-the same ingest once the API recovers.
+LLM extraction is required: if it cannot run — for any reason — the whole
+ingest fails before anything is archived or indexed. A missing
+`ANTHROPIC_API_KEY` errors immediately (`Error::ExtractorNotConfigured`,
+naming the fix). A transient LLM failure is retried in-band by
+`ClaudeExtractor` (3 attempts total; connection errors and HTTP 429/5xx,
+with short linear backoff — see `MAX_ATTEMPTS` in `extraction/llm.rs`);
+a sustained outage then errors the `ingest_record` call. In every failure
+case nothing is persisted, so there is no partial text-only state to
+reconcile and nothing for `rebuild_index` to resurrect — the caller fixes
+the configuration or waits out the outage, then re-runs the same ingest.
+(Total *verification* failure is not an error: an extraction where every
+claim fails verification still applies as `"applied"` with zero codings
+and the reasons in `rejected`.)
 
 ## Queries
 
@@ -263,8 +265,8 @@ the local-FS archive at `$DIR/archive/`, and the derived store at
 
 - `ingest_record` — ingest a document (write path); `kind="ccda"` for CCDA
   XML, `kind="clinical-pdf"` for a narrative clinical PDF (see Narrative
-  documents below) — text-indexes it always, and extracts verified codings
-  when `ANTHROPIC_API_KEY` is set
+  documents below) — indexes its text and extracts verified codings; requires
+  `ANTHROPIC_API_KEY` (a keyless or failed extraction fails the ingest)
 - `latest_observation_by_code` — most-recent observation by LOINC code
 - `get_observation_history` — observations across one or more `{system, code}` codings,
   with optional open-ended `since`/`until` bounds (replaces `observations_in_range`)

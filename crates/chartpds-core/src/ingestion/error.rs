@@ -30,6 +30,15 @@ pub enum Error {
     #[error("adapter replay failed")]
     Adapter(#[source] crate::sources::Error),
 
+    /// Narrative ingestion was attempted with no LLM extractor configured.
+    ///
+    /// Narrative ingestion requires LLM extraction — there is no text-only
+    /// fallback — so a missing `ANTHROPIC_API_KEY` fails the ingest before
+    /// anything is persisted. The message names the fix because the MCP
+    /// layer surfaces errors via plain `Display`.
+    #[error("narrative extraction is not configured: set ANTHROPIC_API_KEY on the server and re-run the ingest")]
+    ExtractorNotConfigured,
+
     /// PDF text extraction or LLM extraction failed fatally.
     ///
     /// The cause is inlined into the message (not a `#[source]` chain)

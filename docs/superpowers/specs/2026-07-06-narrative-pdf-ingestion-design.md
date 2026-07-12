@@ -73,7 +73,7 @@ are content-addressed with sidecar manifests:
 | `source` | caller-supplied (e.g. `manual-upload`) | `chartpds` |
 
 The PDF manifest is written after extraction completes so `subject` can carry
-the extracted document date; if extraction fails, `subject` is omitted.
+the extracted document date; if no date verifies, `subject` is omitted.
 
 ## Extraction artifact format
 
@@ -170,10 +170,13 @@ client (reqwest, already a workspace dependency), and verification.
   a real portal printout before building on it.
 - `ANTHROPIC_API_KEY` read from the environment. Model pinned in code;
   model id + prompt version recorded in every artifact.
-- **No key configured:** ingest degrades gracefully to text-only (archive +
-  FTS work, no codings), reported in-band as
-  `extraction_status: "skipped_no_extractor"`. Total verification failure
-  also still applies (an empty extraction with everything in `rejected`).
+- **No key configured:** the ingest fails immediately with an error naming
+  the missing `ANTHROPIC_API_KEY`; nothing is persisted. LLM extraction is
+  required — the originally designed text-only degradation (reported in-band
+  as `extraction_status: "skipped_no_extractor"`) proved too easy to miss in
+  practice: a harness missing the key silently built half-indexed documents.
+  Total verification failure is still not an error (an empty extraction with
+  everything in `rejected` applies as `"applied"` with zero codings).
 - **LLM failure:** transient failures (connection errors, HTTP 429/5xx) are
   retried in-band — 3 attempts with short linear backoff, sized for the
   interactive ingest-then-query session. A sustained outage then fails the

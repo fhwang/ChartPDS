@@ -43,8 +43,8 @@ impl Harness {
     ///
     /// The server is started with no source credentials and the sync daemon
     /// disabled, so the harness exercises only the local ingest/query path.
-    /// With no LLM configured, narrative ingestion always takes the
-    /// no-extractor (text-only) path.
+    /// With no LLM configured, live narrative ingestion fails up front
+    /// (extraction is required); rebuild replay works keyless.
     ///
     /// # Panics
     ///
