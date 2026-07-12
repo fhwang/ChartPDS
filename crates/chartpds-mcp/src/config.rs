@@ -15,7 +15,8 @@ const ENV_SYNC_INTERVAL_SECS: &str = "CHARTPDS_SYNC_INTERVAL_SECS";
 
 /// Configuration assembled from environment variables.
 pub(crate) struct Config {
-    /// Root directory for all `ChartPDS` data (archive + `SQLite` DB).
+    /// Root directory for all `ChartPDS` data (archive + derived store +
+    /// `SQLite` DB).
     data_dir: PathBuf,
     /// Google Health OAuth client ID (optional; needed only for the Fitbit adapter).
     pub(crate) google_health_client_id: Option<String>,
@@ -74,9 +75,16 @@ impl Config {
         )
     }
 
-    /// Archive directory path derived from the data directory.
+    /// Archive directory path (source bytes from outside) under the data
+    /// directory.
     pub(crate) fn archive_path(&self) -> PathBuf {
         self.data_dir.join("archive")
+    }
+
+    /// Derived-store directory path (machine-generated derivations, e.g.
+    /// extraction artifacts) under the data directory.
+    pub(crate) fn derived_path(&self) -> PathBuf {
+        self.data_dir.join("derived")
     }
 
     /// The data directory itself (for creating it at boot).

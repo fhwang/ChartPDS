@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT nt.source_document_id AS \"source_document_id!: i64\",\n                   nt.title,\n                   sd.kind AS \"kind!\", sd.source AS \"source!\",\n                   sd.document_date,\n                   substr(nt.text, 1, 200) AS \"snippet!: String\"\n            FROM narrative_texts nt\n            JOIN source_documents sd ON sd.id = nt.source_document_id\n            ORDER BY sd.document_date DESC, sd.id DESC\n            LIMIT ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_document_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "document_date",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "snippet!: String",
+        "ordinal": 5,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "5dc560d60a2045286e649696bf2411881ebad660b1e49d90c665479341d4cb22"
+}

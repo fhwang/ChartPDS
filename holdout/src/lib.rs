@@ -15,6 +15,8 @@
 //! and the `holdout` CI workflow. Do not edit anything under `holdout/` to make
 //! a failing test pass — a failure is a real regression. Fix the code instead.
 
+pub mod mock_llm;
+
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolRequestParams, RawContent};
@@ -41,12 +43,35 @@ impl Harness {
     ///
     /// The server is started with no source credentials and the sync daemon
     /// disabled, so the harness exercises only the local ingest/query path.
+    /// With no LLM configured, narrative ingestion always takes the
+    /// no-extractor (text-only) path.
     ///
     /// # Panics
     ///
     /// Panics if the `chartpds-mcp` binary cannot be located or spawned, or if
     /// the initialize handshake fails.
     pub async fn start() -> Self {
+        Self::start_inner(None).await
+    }
+
+    /// Like [`Harness::start`], but with LLM extraction enabled against a
+    /// mock server: sets a fake `ANTHROPIC_API_KEY` and points
+    /// `ANTHROPIC_BASE_URL` at `llm_base_url` (see [`mock_llm::MockLlm`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `llm_base_url` is not a loopback `http://127.0.0.1:` URL —
+    /// the holdout suite must never be able to reach the real API, so
+    /// hermeticity is enforced here rather than left to convention.
+    pub async fn start_with_llm(llm_base_url: &str) -> Self {
+        assert!(
+            llm_base_url.starts_with("http://127.0.0.1:"),
+            "holdout LLM base URL must be loopback (http://127.0.0.1:<port>), got {llm_base_url}"
+        );
+        Self::start_inner(Some(llm_base_url)).await
+    }
+
+    async fn start_inner(llm_base_url: Option<&str>) -> Self {
         let data_dir = TempDir::new().expect("create temp data dir");
         let data_path = data_dir.path().to_owned();
         let transport = TokioChildProcess::new(
@@ -58,6 +83,16 @@ impl Harness {
                 cmd.env_remove("GOOGLE_HEALTH_CLIENT_ID");
                 cmd.env_remove("GOOGLE_HEALTH_CLIENT_SECRET");
                 cmd.env_remove("OURA_PERSONAL_ACCESS_TOKEN");
+                // Never let a developer's exported credentials reach the
+                // server: the holdout suite must be hermetic. Extraction is
+                // either off (text-only path) or aimed at a loopback mock
+                // with a fake key — never the real API.
+                cmd.env_remove("ANTHROPIC_API_KEY");
+                cmd.env_remove("ANTHROPIC_BASE_URL");
+                if let Some(base_url) = llm_base_url {
+                    cmd.env("ANTHROPIC_API_KEY", "holdout-mock-key");
+                    cmd.env("ANTHROPIC_BASE_URL", base_url);
+                }
             }),
         )
         .expect("spawn chartpds-mcp");
@@ -78,6 +113,24 @@ impl Harness {
     /// Panics if `args` is neither an object nor null, if the tool call errors,
     /// if it returns no text content, or if that text is not valid JSON.
     pub async fn call_tool(&self, name: &'static str, args: Value) -> Value {
+        self.try_call_tool(name, args)
+            .await
+            .unwrap_or_else(|err| panic!("tool call {name} failed: {err}"))
+    }
+
+    /// Like [`Harness::call_tool`], but returns `Err` with the error message
+    /// when the tool call itself fails — for contracts where the failure IS
+    /// the expected product behavior (e.g. an LLM outage failing an ingest).
+    ///
+    /// # Errors
+    ///
+    /// Returns the server's error message when the tool call fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `args` is neither an object nor null, or if a *successful*
+    /// call returns no text content or non-JSON text.
+    pub async fn try_call_tool(&self, name: &'static str, args: Value) -> Result<Value, String> {
         let arguments = match args {
             Value::Object(map) => Some(map),
             Value::Null => None,
@@ -89,7 +142,7 @@ impl Harness {
             .client
             .call_tool(param)
             .await
-            .unwrap_or_else(|err| panic!("tool call {name} failed: {err}"));
+            .map_err(|err| err.to_string())?;
         let text = result
             .content
             .iter()
@@ -98,8 +151,8 @@ impl Harness {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("tool {name} returned no text content"));
-        serde_json::from_str(&text)
-            .unwrap_or_else(|err| panic!("tool {name} text content is not JSON: {err}"))
+        Ok(serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("tool {name} text content is not JSON: {err}")))
     }
 
     /// Plant every file from `fixtures/<subdir>/` into the server's archive

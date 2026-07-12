@@ -49,11 +49,13 @@ The `index/` module uses sqlx with compile-time SQL verification in
 cache; it does NOT connect to a live database. The cache lives in `.sqlx/`
 at the workspace root.
 
-The index currently has 9 tables: `source_documents`, `observations`,
-`problems`, `medications` (populated by ingestion), `source_credentials`,
-`source_state`, `source_day_state` (populated by the adapter/sync layer),
-plus `notification_state` and `notification_log` (populated by the
-notification system).
+The index currently has 10 tables: `source_documents`, `observations`,
+`problems`, `medications`, `narrative_texts` (populated by ingestion),
+`source_credentials`, `source_state`, `source_day_state` (populated by
+the adapter/sync layer), plus `notification_state` and `notification_log`
+(populated by the notification system). `narrative_texts` has an FTS5
+companion index, `narrative_texts_fts` (external-content, trigger-maintained
+on insert/update/delete of `narrative_texts`), used by `search_narratives`.
 
 After any change to `crates/chartpds-core/migrations/*.sql` or any
 `sqlx::query!`/`sqlx::query_as!` invocation:
@@ -107,7 +109,7 @@ makes rebuilds cheap, so schema mistakes are recoverable by re-ingest.
 The archive (`archive/`) is a content-addressed blob store: every blob's
 path is the SHA-256 hex of its bytes, so equal content dedupes automatically.
 All source types share one flat `$DIR/archive/` directory; the bytes stay the
-raw, untouched payload (CCDA XML, Fitbit/Oura JSON).
+raw, untouched payload (CCDA XML, Fitbit/Oura JSON, clinical PDFs).
 
 Each blob is paired with a **sidecar manifest** `<hash>.meta.json` that makes
 the archive self-describing — the SQLite index can be fully reconstructed from
@@ -126,6 +128,27 @@ blob then the sidecar and stamps the manifest `id` with the content hash. Bare
 `archived_at` is the immutable time the bytes first entered the archive. It is
 carried in the manifest and copied *through* on rebuild — it is **not** the
 projection-build time and must never be re-stamped to "now".
+
+## Derived store
+
+`$DIR/derived/` is a second content-addressed blob store (same `Archive` type,
+same manifest sidecar scheme) holding **machine-generated derivations** —
+currently the frozen narrative extraction artifacts. The three storage tiers:
+
+- **archive** — bytes that arrived from outside. Sacred; never GC'd; the
+  system of record.
+- **derived** — expensive-to-recreate derivations (LLM output is
+  non-deterministic and costs money to regenerate, so it is persisted, not
+  recomputed on rebuild). Versioned via each artifact's `extractor`
+  `{model, prompt_version}`; less sacred than the archive, more precious than
+  the index.
+- **index** — the disposable SQLite projection, rebuilt from the two stores.
+
+`rebuild_index` replays both stores. Derived-store blobs must be
+`narrative-extraction` artifacts; anything else there is skipped, never
+type-sniffed as a source document. Extraction artifacts found in the
+*archive* (a legacy layout predating the derived store) still replay
+identically.
 
 ## Ingestion
 
@@ -154,12 +177,57 @@ failing the whole document. Note Epic encodes calculated LDL-C as a
 `nullFlavor` `PQ` whose number lives in a nested `<translation value=…>`;
 `extract_pq_value` recovers it, so do not "simplify" that fallback away.
 
+## Narrative documents
+
+`kind = "clinical-pdf"` ingests a narrative clinical PDF (pathology/imaging
+report, visit note) instead of structured CCDA. `ingestion::ingest_narrative_pdf`
+is the orchestrator: deterministic text extraction (`extraction::extract_pdf_text`,
+via `pdf-extract`) runs first and unconditionally — a scanned PDF with no text
+layer is a hard error (`Error::NoTextLayer`) before anything is archived;
+OCR is out of scope. If `ANTHROPIC_API_KEY` is set, a one-time LLM pass
+(`extraction::ClaudeExtractor`, model pinned in `extraction/llm.rs` as
+`EXTRACTION_MODEL`) extracts explicitly-quoted ICD-10-CM codes and a document
+date. `ANTHROPIC_BASE_URL` optionally overrides the API endpoint (same
+variable the official Anthropic SDKs honor — for proxies/gateways, and how
+the holdout suite points the binary at a local mock LLM server). LLM output is never trusted directly: `extraction::verify_extraction`
+mechanically checks every claim against the extracted text (whitespace-
+normalized substring match; a coding's code must appear inside its own quote;
+a claimed date must appear literally in its quote) and drops anything that
+doesn't verify, recording why in `rejected`.
+
+Design invariant: the LLM runs exactly once, at ingest. Its verified output is
+frozen as its own JSON blob in the **derived store** (`$DIR/derived/`) — an
+`ExtractionArtifact` (manifest kind `NARRATIVE_EXTRACTION_KIND` =
+`"narrative-extraction"`) referencing the PDF blob's hash — and
+`rebuild_index` replays that frozen artifact rather than calling the model
+again. This keeps rebuilds free, deterministic, and safe to run without
+network access or an API key.
+
+Verified codings land in `problems` alongside CCDA-derived ones, with
+`problems.section_label` set to the verbatim section heading the code
+appeared under in the source document (NULL for CCDA rows — it's
+presentational provenance for an LLM reader, not machine-aggregatable).
+
+Extraction failure handling distinguishes "no extractor" from "extractor
+failed". With no `ANTHROPIC_API_KEY`, ingestion degrades gracefully to a
+text-only narrative (`extraction_status: "skipped_no_extractor"`); every
+claim failing verification still applies as an empty extraction
+(`"applied"` with zero codings). But an LLM *failure* fails the whole
+ingest: `ClaudeExtractor` retries transient failures in-band (3 attempts
+total; connection errors and HTTP 429/5xx, with short linear backoff —
+see `MAX_ATTEMPTS` in `extraction/llm.rs`), and a sustained outage then
+errors the `ingest_record` call before anything is archived or indexed.
+Nothing is persisted, so there is no partial text-only state to reconcile
+and nothing for `rebuild_index` to resurrect — the caller simply re-runs
+the same ingest once the API recovers.
+
 ## Queries
 
 `queries::` holds generic analytical primitives over the index.
 Currently: `latest_by_code`, `observation_history`, `counts_per_code`,
 `current_problems`, `current_medications`, `duration_in_value_range`,
-`longest_continuous_in_value_range`. Each is a pure async function
+`longest_continuous_in_value_range`, `search_narratives`, `get_narrative`.
+Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
 The `current_problems` and `current_medications` primitives return deduped
@@ -189,10 +257,14 @@ cache the new SQL.
 
 `chartpds-mcp` is the stdio MCP server binary. It reads
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
-e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`
-and the local-FS archive at `$DIR/archive/`, and serves 13 tools:
+e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`,
+the local-FS archive at `$DIR/archive/`, and the derived store at
+`$DIR/derived/`, and serves 15 tools:
 
-- `ingest_record` — ingest a CCDA document (write path)
+- `ingest_record` — ingest a document (write path); `kind="ccda"` for CCDA
+  XML, `kind="clinical-pdf"` for a narrative clinical PDF (see Narrative
+  documents below) — text-indexes it always, and extracts verified codings
+  when `ANTHROPIC_API_KEY` is set
 - `latest_observation_by_code` — most-recent observation by LOINC code
 - `get_observation_history` — observations across one or more `{system, code}` codings,
   with optional open-ended `since`/`until` bounds (replaces `observations_in_range`)
@@ -216,6 +288,12 @@ and the local-FS archive at `$DIR/archive/`, and serves 13 tools:
   archive_error, database_error)
 - `rebuild_index` — drop and rebuild the index from archived blobs
 - `list_notifications` — list recent notification log entries (newest first)
+- `search_narratives` — full-text search (FTS5, BM25-ranked) over narrative
+  clinical documents; omit `query` to list the whole narrative catalog
+  newest-first
+- `get_narrative` — fetch one narrative document by `source_document_id`:
+  metadata, full extracted text, and its verified codings (with
+  `section_label`)
 
 Adding a new tool: define an `async fn` on the `ChartPdsServer` impl
 inside the `#[tool_router]` block in `crates/chartpds-mcp/src/server.rs`.
@@ -297,17 +375,28 @@ dispatches any that fire (see Notifications below).
 
 To regenerate the index after a parser fix or schema change, call
 `rebuild_index`. It clears `source_documents` (cascading to
-observations, problems, and medications) and replays every archived
-blob, routed by its sidecar manifest `type`: CCDA documents are
-re-ingested, Fitbit/Oura blobs are replayed by their adapters
-(`sources::{fitbit,oura}::storage::replay`). All sources are
-reconstructed from the archive alone — no `sync_source` re-pull is
+observations, problems, medications, and narrative_texts) and replays
+every blob from both the archive and the derived store, routed by its
+sidecar manifest `type`: CCDA documents are re-ingested, Fitbit/Oura
+blobs are replayed by their adapters
+(`sources::{fitbit,oura}::storage::replay`), and `clinical-pdf`
+blobs have their text re-derived deterministically (`extract_pdf_text`
+on the archived bytes — never an LLM call). All sources are
+reconstructed from the two stores alone — no `sync_source` re-pull is
 needed. Each blob's `archived_at` is preserved from its manifest.
+
+Narrative extraction results are replayed, not regenerated: rebuild runs
+in two phases so a `narrative-extraction` artifact blob (normally in the
+derived store; legacy artifacts in the archive replay identically) is
+collected in phase one and applied to its narrative document's `problems`
+rows in a second pass once every document exists. This is what makes
+rebuild network-free even for narrative documents extracted with an LLM.
 
 Blobs with no manifest (legacy, pre-manifest) fall back to a
 best-effort CCDA parse. Unknown manifest types and malformed payloads
 are counted as skipped. `RebuildResult` reports per-source counts:
-`{blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, blobs_skipped}`.
+`{blobs_found, ccda_ingested, fitbit_ingested, oura_ingested,
+blobs_skipped, narratives_ingested, extractions_applied}`.
 
 ## Notifications
 

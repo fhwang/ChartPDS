@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE narrative_texts SET title = ? WHERE source_document_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "be3f573f91d99025cdcff38847fc125f4b4e9324f60addf6c77903925022f333"
+}

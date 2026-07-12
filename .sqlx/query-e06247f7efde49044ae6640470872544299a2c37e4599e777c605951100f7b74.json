@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT DISTINCT coding_system AS \"coding_system!\", coding_code AS \"coding_code!\",\n               section_label AS \"section_label!\"\n        FROM problems\n        WHERE section_label IS NOT NULL\n        ORDER BY coding_system, coding_code, section_label\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "coding_system!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "coding_code!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "section_label!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e06247f7efde49044ae6640470872544299a2c37e4599e777c605951100f7b74"
+}

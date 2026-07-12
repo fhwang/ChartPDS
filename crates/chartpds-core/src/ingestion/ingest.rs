@@ -127,6 +127,7 @@ pub async fn ingest(
                 coding_display: prob.coding_display.as_deref(),
                 status: &prob.status,
                 onset_date: prob.onset_date.as_deref(),
+                section_label: None,
             },
         )
         .await?;

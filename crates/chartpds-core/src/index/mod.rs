@@ -8,6 +8,7 @@
 mod clear;
 mod medications;
 mod migrations;
+mod narrative_texts;
 mod notification_log;
 mod notification_state;
 mod observations;
@@ -24,6 +25,10 @@ pub use medications::{
     InsertParams as InsertMedicationParams, Medication,
 };
 pub use migrations::run_migrations;
+pub use narrative_texts::{
+    get_by_source_document as get_narrative_text, set_title as set_narrative_title,
+    upsert as upsert_narrative_text, NarrativeText, UpsertParams as UpsertNarrativeTextParams,
+};
 pub use notification_log::{
     append as append_notification_log, list_recent as list_recent_notification_log,
     NotificationLogEntry,
@@ -49,10 +54,12 @@ pub use source_day_state::{
     upsert as upsert_source_day_state, SourceDayState, UpsertParams as UpsertSourceDayStateParams,
 };
 pub use source_documents::{
+    delete_by_id as delete_source_document,
     fetch_by_archive_key as fetch_source_document_by_archive_key,
     get_by_id as get_source_document_by_id, insert as insert_source_document,
     insert_superseding as insert_source_document_superseding,
-    InsertParams as InsertSourceDocumentParams, SourceDocument, SupersedeOutcome,
+    set_document_date as set_source_document_date, InsertParams as InsertSourceDocumentParams,
+    SourceDocument, SupersedeOutcome,
 };
 pub use source_state::{
     get as get_source_state, upsert as upsert_source_state,

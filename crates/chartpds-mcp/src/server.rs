@@ -1,6 +1,7 @@
 //! The MCP server struct + tool handlers.
 
 use chartpds_core::archive::Archive;
+use chartpds_core::ingestion::NarrativeIngestParams;
 use chartpds_core::sources::oauth::OAuthConfig;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -39,9 +40,11 @@ pub(crate) struct IngestRecordArgs {
     /// Provide either `file_path` or `content`, not both.
     pub(crate) file_path: Option<String>,
     /// The full CCDA XML content as a string (for small inline payloads).
-    /// Provide either `file_path` or `content`, not both.
+    /// Provide either `file_path` or `content`, not both. Not usable for
+    /// `kind="clinical-pdf"`: binary PDF bytes cannot be passed through this
+    /// string parameter — use `file_path` instead.
     pub(crate) content: Option<String>,
-    /// Document kind. Currently only `"ccda"` is supported.
+    /// Document kind: "ccda" or "clinical-pdf".
     pub(crate) kind: String,
     /// Source identifier (e.g. `"manual-upload"`, `"fitbit"`).
     pub(crate) source: String,
@@ -76,6 +79,23 @@ pub(crate) struct DescribeCodingsArgs {}
 pub(crate) struct ListNotificationsArgs {
     /// Max number of notifications to return (default 20).
     pub(crate) limit: Option<i64>,
+}
+
+/// Arguments for the `search_narratives` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct SearchNarrativesArgs {
+    /// FTS5 full-text query (e.g. `"biopsy proctitis"`). Omit to list the
+    /// full narrative catalog, newest first.
+    pub(crate) query: Option<String>,
+    /// Maximum results (default 20).
+    pub(crate) limit: Option<i64>,
+}
+
+/// Arguments for the `get_narrative` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct GetNarrativeArgs {
+    /// The narrative's `source_document_id` (from `search_narratives`).
+    pub(crate) document_id: i64,
 }
 
 /// A coding selector: FHIR system URI plus code.
@@ -129,13 +149,15 @@ pub(crate) struct ObservationLongestPeriodInRangeArgs {
 
 /// `ChartPDS` MCP server.
 ///
-/// Holds the shared `SqlitePool`, the blob [`Archive`], and an `rmcp`
-/// `ToolRouter`. Each tool is an `async fn` on this impl annotated with
-/// `#[tool(description = "...")]`.
+/// Holds the shared `SqlitePool`, the source-bytes [`Archive`], the derived
+/// store (same content-addressed shape, holds machine-generated derivations
+/// such as extraction artifacts), and an `rmcp` `ToolRouter`. Each tool is an
+/// `async fn` on this impl annotated with `#[tool(description = "...")]`.
 #[derive(Clone)]
 pub(crate) struct ChartPdsServer {
     pool: SqlitePool,
     archive: Archive,
+    derived: Archive,
     oauth_config: Option<OAuthConfig>,
     http_client: reqwest::Client,
     tool_router: ToolRouter<Self>,
@@ -146,12 +168,14 @@ impl ChartPdsServer {
     pub(crate) fn new(
         pool: SqlitePool,
         archive: Archive,
+        derived: Archive,
         oauth_config: Option<OAuthConfig>,
         http_client: reqwest::Client,
     ) -> Self {
         Self {
             pool,
             archive,
+            derived,
             oauth_config,
             http_client,
             tool_router: Self::tool_router(),
@@ -283,22 +307,12 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Ingest a CCDA document. Provide either file_path (server reads the file directly) or content (inline XML string). Archives the blob, parses it, and indexes observations, problems, and medications. Returns the source_document id."
+        description = "Ingest a medical record document. kind=\"ccda\": CCDA XML (observations, problems, medications). kind=\"clinical-pdf\": a narrative clinical PDF (pathology/imaging report, visit note) — archives the PDF, indexes its text for search_narratives, and (when ANTHROPIC_API_KEY is set) extracts explicitly-quoted ICD-10 codes into problems via a one-time verified LLM pass; without a key it ingests text-only. An LLM outage (after brief in-band retries) fails the ingest without persisting anything — re-run it once the API recovers. kind=\"clinical-pdf\" requires file_path (binary PDF bytes cannot be passed via the content string parameter). Returns what was extracted, verified, and dropped."
     )]
     async fn ingest_record(
         &self,
         Parameters(args): Parameters<IngestRecordArgs>,
     ) -> Result<CallToolResult, McpError> {
-        if args.kind != "ccda" {
-            return Err(McpError::invalid_params(
-                format!(
-                    "unsupported kind {:?}; only \"ccda\" is supported",
-                    args.kind
-                ),
-                None,
-            ));
-        }
-
         let (content, original_filename) = match (args.file_path, args.content) {
             (Some(path), None) => {
                 let data = std::fs::read(&path).map_err(|err| {
@@ -326,23 +340,54 @@ impl ChartPdsServer {
             }
         };
 
-        let source_document_id = chartpds_core::ingestion::ingest(
-            &self.archive,
-            &self.pool,
-            content,
-            &args.kind,
-            &args.source,
-            original_filename.as_deref(),
-            time::OffsetDateTime::now_utc(),
-        )
-        .await
-        .map_err(|err| McpError::internal_error(format!("ingestion failed: {err}"), None))?;
-
-        let result = serde_json::json!({ "source_document_id": source_document_id });
-        let json = serde_json::to_string(&result)
-            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        match args.kind.as_str() {
+            "ccda" => {
+                let source_document_id = chartpds_core::ingestion::ingest(
+                    &self.archive,
+                    &self.pool,
+                    content,
+                    &args.kind,
+                    &args.source,
+                    original_filename.as_deref(),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .map_err(|err| {
+                    McpError::internal_error(format!("ingestion failed: {err}"), None)
+                })?;
+                let result = serde_json::json!({ "source_document_id": source_document_id });
+                let json = serde_json::to_string(&result)
+                    .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            "clinical-pdf" => {
+                let extractor =
+                    chartpds_core::extraction::ClaudeExtractor::from_env(self.http_client.clone());
+                let outcome = chartpds_core::ingestion::ingest_narrative_pdf(
+                    &self.archive,
+                    &self.derived,
+                    &self.pool,
+                    content,
+                    NarrativeIngestParams {
+                        source: &args.source,
+                        original_filename: original_filename.as_deref(),
+                        archived_at: time::OffsetDateTime::now_utc(),
+                    },
+                    extractor.as_ref(),
+                )
+                .await
+                .map_err(|err| {
+                    McpError::internal_error(format!("ingestion failed: {err}"), None)
+                })?;
+                let json = serde_json::to_string(&outcome)
+                    .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            other => Err(McpError::invalid_params(
+                format!("unsupported kind {other:?}; supported: \"ccda\", \"clinical-pdf\""),
+                None,
+            )),
+        }
     }
 
     #[tool(
@@ -417,15 +462,16 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Drop and rebuild the entire index from archived blobs, replaying every source (CCDA, Fitbit, Oura) via each blob's sidecar manifest. No re-sync needed. Unknown or malformed blobs are skipped. Returns {blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, blobs_skipped}."
+        description = "Drop and rebuild the entire index from the archive and the derived store, replaying every source (CCDA, Fitbit, Oura, narrative PDFs + frozen extraction artifacts) via each blob's sidecar manifest. No re-sync needed. Unknown or malformed blobs are skipped. Returns {blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, blobs_skipped}."
     )]
     async fn rebuild_index(
         &self,
         Parameters(_args): Parameters<ObservationCountsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let result = chartpds_core::ingestion::rebuild_index(&self.archive, &self.pool)
-            .await
-            .map_err(|err| McpError::internal_error(format!("rebuild failed: {err}"), None))?;
+        let result =
+            chartpds_core::ingestion::rebuild_index(&self.archive, &self.derived, &self.pool)
+                .await
+                .map_err(|err| McpError::internal_error(format!("rebuild failed: {err}"), None))?;
         let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -578,6 +624,38 @@ impl ChartPdsServer {
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(
+        description = "Full-text search over narrative clinical documents (FTS5, BM25-ranked). Args: query? (FTS5 syntax; omit to list the whole narrative catalog newest-first), limit? (default 20). Query terms containing punctuation (e.g. the ICD-10 code \"R10.9\") must be double-quoted inside the query string, or FTS5 will fail to parse them. Returns [{source_document_id, title, kind, source, document_date, snippet}]. Pass source_document_id to get_narrative for the full text."
+    )]
+    async fn search_narratives(
+        &self,
+        Parameters(args): Parameters<SearchNarrativesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(20);
+        let hits =
+            chartpds_core::queries::search_narratives(&self.pool, args.query.as_deref(), limit)
+                .await
+                .map_err(|err| McpError::invalid_params(format!("search failed: {err}"), None))?;
+        let json = serde_json::to_string(&hits)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Fetch one narrative clinical document: metadata, full extracted text, and the verified codings extracted from it (with their section labels). Args: document_id (a source_document_id from search_narratives). Returns null if document_id doesn't exist or isn't a narrative (clinical-pdf) document."
+    )]
+    async fn get_narrative(
+        &self,
+        Parameters(args): Parameters<GetNarrativeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let detail = chartpds_core::queries::get_narrative(&self.pool, args.document_id)
+            .await
+            .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+        let json = serde_json::to_string(&detail)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ── Private helpers ──────────────────────────────────────────────────
@@ -703,6 +781,9 @@ mod tests {
     use time::macros::datetime;
     use time::OffsetDateTime;
 
+    const PDF_FIXTURE: &[u8] =
+        include_bytes!("../../chartpds-core/src/extraction/fixtures/synthetic_pathology.pdf");
+
     async fn fresh_server_with_empty_db() -> ChartPdsServer {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("test.db");
@@ -710,7 +791,8 @@ mod tests {
         std::mem::forget(dir);
         let pool = open_pool(&url).await.expect("open pool");
         let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
-        ChartPdsServer::new(pool, archive, None, reqwest::Client::new())
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
     }
 
     async fn fresh_server_with_one_weight() -> ChartPdsServer {
@@ -755,7 +837,8 @@ mod tests {
         .expect("obs");
 
         let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
-        ChartPdsServer::new(pool, archive, None, reqwest::Client::new())
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
     }
 
     #[tokio::test]
@@ -1160,7 +1243,8 @@ mod tests {
         }
 
         let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
-        ChartPdsServer::new(pool, archive, None, reqwest::Client::new())
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
     }
 
     #[tokio::test]
@@ -1283,7 +1367,8 @@ mod tests {
         }
 
         let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
-        ChartPdsServer::new(pool, archive, None, reqwest::Client::new())
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
     }
 
     #[tokio::test]
@@ -1444,5 +1529,83 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         assert_eq!(value["results"].as_array().expect("array").len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ingest_record_clinical_pdf_ingests_text_only_without_key() {
+        // Hermetic: never let this test reach the network. `from_env` reads
+        // ANTHROPIC_API_KEY, so clear it for this process before ingesting;
+        // env mutation is process-global, so this test runs single-threaded
+        // (flavor = "current_thread") and is the only test touching this var.
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let server = fresh_server_with_empty_db().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("synthetic_pathology.pdf");
+        std::fs::write(&path, PDF_FIXTURE).expect("write fixture");
+
+        let result = server
+            .ingest_record(Parameters(IngestRecordArgs {
+                file_path: Some(path.to_string_lossy().into_owned()),
+                content: None,
+                kind: "clinical-pdf".to_string(),
+                source: "manual-upload".to_string(),
+                original_filename: None,
+            }))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert!(value["source_document_id"].as_i64().is_some());
+        assert_eq!(value["extraction_status"], "skipped_no_extractor");
+
+        // The text is now searchable.
+        let search = server
+            .search_narratives(Parameters(SearchNarrativesArgs {
+                query: Some("proctitis OR dysplasia".to_string()),
+                limit: None,
+            }))
+            .await
+            .expect("search");
+        let text = match &search.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let hits: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(hits.as_array().expect("array").len(), 1);
+
+        // And retrievable in full.
+        let doc_id = value["source_document_id"].as_i64().expect("id");
+        let get = server
+            .get_narrative(Parameters(GetNarrativeArgs {
+                document_id: doc_id,
+            }))
+            .await
+            .expect("get");
+        let text = match &get.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let detail: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert!(detail["text"].as_str().expect("text").contains("DIAGNOSIS"));
+    }
+
+    #[tokio::test]
+    async fn ingest_record_rejects_unknown_kind() {
+        let server = fresh_server_with_empty_db().await;
+        let err = server
+            .ingest_record(Parameters(IngestRecordArgs {
+                file_path: None,
+                content: Some("whatever".to_string()),
+                kind: "hl7v2".to_string(),
+                source: "test".to_string(),
+                original_filename: None,
+            }))
+            .await
+            .expect_err("unknown kind must be rejected");
+        assert!(err.to_string().contains("hl7v2"));
     }
 }

@@ -19,6 +19,9 @@ pub struct Problem {
     pub status: String,
     /// Date of onset, if known (ISO-8601 date string).
     pub onset_date: Option<String>,
+    /// Verbatim section heading the coding appeared under in a narrative
+    /// document (e.g. `"Pre-Op Diagnosis/Indications"`). `None` for CCDA rows.
+    pub section_label: Option<String>,
 }
 
 /// Parameters for [`insert`].
@@ -35,6 +38,8 @@ pub struct InsertParams<'a> {
     pub status: &'a str,
     /// Date of onset, if known.
     pub onset_date: Option<&'a str>,
+    /// Verbatim narrative section heading, if any.
+    pub section_label: Option<&'a str>,
 }
 
 /// Insert a new problem row.
@@ -48,9 +53,9 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         r#"
         INSERT INTO problems (
             source_document_id, coding_system, coding_code, coding_display,
-            status, onset_date
+            status, onset_date, section_label
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
         params.source_document_id,
@@ -59,6 +64,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         params.coding_display,
         params.status,
         params.onset_date,
+        params.section_label,
     )
     .fetch_one(pool)
     .await?;
@@ -78,7 +84,7 @@ pub async fn list_by_source_document(
         r#"
         SELECT id AS "id!: i64", source_document_id AS "source_document_id!: i64",
                coding_system, coding_code, coding_display,
-               status, onset_date
+               status, onset_date, section_label
         FROM problems
         WHERE source_document_id = ?
         ORDER BY onset_date
@@ -98,6 +104,7 @@ pub async fn list_by_source_document(
             coding_display: r.coding_display,
             status: r.status,
             onset_date: r.onset_date,
+            section_label: r.section_label,
         })
         .collect())
 }
@@ -149,6 +156,7 @@ mod tests {
                 coding_display: Some("Type 2 diabetes mellitus"),
                 status: "active",
                 onset_date: Some("2020-03-15"),
+                section_label: None,
             },
         )
         .await
@@ -163,5 +171,30 @@ mod tests {
         );
         assert_eq!(rows[0].status, "active");
         assert_eq!(rows[0].onset_date.as_deref(), Some("2020-03-15"));
+        assert_eq!(rows[0].section_label, None);
+    }
+
+    #[tokio::test]
+    async fn section_label_round_trips() {
+        let (pool, doc_id) = fresh_pool_with_doc().await;
+        insert(
+            &pool,
+            InsertParams {
+                source_document_id: doc_id,
+                coding_system: "http://hl7.org/fhir/sid/icd-10-cm",
+                coding_code: "R10.9",
+                coding_display: Some("Abdominal pain, unspecified"),
+                status: "unknown",
+                onset_date: Some("2026-04-21"),
+                section_label: Some("Pre-Op Diagnosis/Indications"),
+            },
+        )
+        .await
+        .expect("insert problem");
+        let rows = list_by_source_document(&pool, doc_id).await.expect("list");
+        assert_eq!(
+            rows[0].section_label.as_deref(),
+            Some("Pre-Op Diagnosis/Indications")
+        );
     }
 }

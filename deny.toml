@@ -44,6 +44,12 @@ skip = [
     # webpki-roots 0.26 (via sqlx-core) vs 1.0 (via reqwest/hyper-rustls).
     # Both carry the same Mozilla CA bundle; unify when sqlx upgrades to webpki-roots 1.x.
     { crate = "webpki-roots@0.26.11", reason = "transitive via sqlx-core; reqwest uses webpki-roots 1.x" },
+    # getrandom 0.2 (via ring/rustls) vs 0.4 (via pdf-extract/lopdf).
+    # Both are stable versions providing the same randomness interface; pdf-extract requires 0.4.
+    { crate = "getrandom@0.2.17", reason = "transitive via ring/rustls; pdf-extract requires getrandom 0.4" },
+    # cpufeatures 0.2 (via sha2 via chart deps) vs 0.3 (via pdf-extract/lopdf).
+    # Both are stable versions; pdf-extract requires 0.3.
+    { crate = "cpufeatures@0.2.17", reason = "transitive via sha2; pdf-extract requires cpufeatures 0.3" },
 ]
 
 [sources]

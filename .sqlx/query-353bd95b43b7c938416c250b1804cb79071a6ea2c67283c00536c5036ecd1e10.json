@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO problems (\n            source_document_id, coding_system, coding_code, coding_display,\n            status, onset_date, section_label\n        )\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        RETURNING id AS \"id!: i64\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "353bd95b43b7c938416c250b1804cb79071a6ea2c67283c00536c5036ecd1e10"
+}

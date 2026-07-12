@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO narrative_texts (source_document_id, title, text)\n        VALUES (?, ?, ?)\n        ON CONFLICT(source_document_id) DO UPDATE SET\n            title = excluded.title,\n            text = excluded.text\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5772461006566e81b2b7f48da36c760e6fdd6397aab7f72a7b552f6861211293"
+}

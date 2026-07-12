@@ -230,6 +230,39 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<SourceDocume
     }))
 }
 
+/// Delete a source document by id. FK CASCADE removes dependent rows
+/// (observations, problems, medications, `narrative_texts`).
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if the statement fails.
+pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query!("DELETE FROM source_documents WHERE id = ?", id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set the `document_date` of an existing source document.
+///
+/// # Errors
+///
+/// Returns `sqlx::Error` if the statement fails.
+pub async fn set_document_date(
+    pool: &SqlitePool,
+    id: i64,
+    document_date: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE source_documents SET document_date = ? WHERE id = ?",
+        document_date,
+        id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
