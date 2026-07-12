@@ -307,7 +307,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Ingest a medical record document. kind=\"ccda\": CCDA XML (observations, problems, medications). kind=\"clinical-pdf\": a narrative clinical PDF (pathology/imaging report, visit note) — archives the PDF, indexes its text for search_narratives, and (when ANTHROPIC_API_KEY is set) extracts explicitly-quoted ICD-10 codes into problems via a one-time verified LLM pass; without a key it ingests text-only. An LLM outage (after brief in-band retries) fails the ingest without persisting anything — re-run it once the API recovers. kind=\"clinical-pdf\" requires file_path (binary PDF bytes cannot be passed via the content string parameter). Returns what was extracted, verified, and dropped."
+        description = "Ingest a medical record document. kind=\"ccda\": CCDA XML (observations, problems, medications). kind=\"clinical-pdf\": a narrative clinical PDF (pathology/imaging report, visit note) — archives the PDF, indexes its text for search_narratives, and extracts explicitly-quoted ICD-10 codes into problems via a one-time verified LLM pass. LLM extraction is required: a missing ANTHROPIC_API_KEY or an LLM outage (after brief in-band retries) fails the ingest without persisting anything — fix the configuration or wait out the outage, then re-run. kind=\"clinical-pdf\" requires file_path (binary PDF bytes cannot be passed via the content string parameter). Returns what was extracted, verified, and dropped."
     )]
     async fn ingest_record(
         &self,
@@ -1532,7 +1532,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ingest_record_clinical_pdf_ingests_text_only_without_key() {
+    async fn ingest_record_clinical_pdf_fails_without_key_and_persists_nothing() {
         // Hermetic: never let this test reach the network. `from_env` reads
         // ANTHROPIC_API_KEY, so clear it for this process before ingesting;
         // env mutation is process-global, so this test runs single-threaded
@@ -1544,7 +1544,7 @@ mod tests {
         let path = dir.path().join("synthetic_pathology.pdf");
         std::fs::write(&path, PDF_FIXTURE).expect("write fixture");
 
-        let result = server
+        let err = server
             .ingest_record(Parameters(IngestRecordArgs {
                 file_path: Some(path.to_string_lossy().into_owned()),
                 content: None,
@@ -1553,16 +1553,13 @@ mod tests {
                 original_filename: None,
             }))
             .await
-            .expect("tool call succeeds");
-        let text = match &result.content[0].raw {
-            rmcp::model::RawContent::Text(t) => &t.text,
-            _ => panic!("expected text content"),
-        };
-        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        assert!(value["source_document_id"].as_i64().is_some());
-        assert_eq!(value["extraction_status"], "skipped_no_extractor");
+            .expect_err("ingest without a key must fail");
+        assert!(
+            err.to_string().contains("ANTHROPIC_API_KEY"),
+            "error must name the missing configuration: {err}"
+        );
 
-        // The text is now searchable.
+        // Nothing was persisted: the failed ingest left no searchable text.
         let search = server
             .search_narratives(Parameters(SearchNarrativesArgs {
                 query: Some("proctitis OR dysplasia".to_string()),
@@ -1575,22 +1572,7 @@ mod tests {
             _ => panic!("expected text content"),
         };
         let hits: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        assert_eq!(hits.as_array().expect("array").len(), 1);
-
-        // And retrievable in full.
-        let doc_id = value["source_document_id"].as_i64().expect("id");
-        let get = server
-            .get_narrative(Parameters(GetNarrativeArgs {
-                document_id: doc_id,
-            }))
-            .await
-            .expect("get");
-        let text = match &get.content[0].raw {
-            rmcp::model::RawContent::Text(t) => &t.text,
-            _ => panic!("expected text content"),
-        };
-        let detail: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-        assert!(detail["text"].as_str().expect("text").contains("DIAGNOSIS"));
+        assert_eq!(hits.as_array().expect("array").len(), 0);
     }
 
     #[tokio::test]

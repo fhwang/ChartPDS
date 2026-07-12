@@ -33,8 +33,9 @@ pub struct NarrativeIngestOutcome {
     pub document_date: Option<String>,
     /// Number of verified codings indexed into `problems`.
     pub codings_indexed: u64,
-    /// `"applied"` or `"skipped_no_extractor"`. An LLM failure is not a
-    /// status: it fails the whole ingest (see [`ingest_narrative_pdf`]).
+    /// Always `"applied"`. Extraction is required, so the only way an
+    /// ingest reports anything else is by failing outright (see
+    /// [`ingest_narrative_pdf`]); the field stays so callers can key on it.
     pub extraction_status: String,
     /// Human-readable reasons for LLM claims dropped by verification.
     pub rejected: Vec<String>,
@@ -53,31 +54,25 @@ pub struct NarrativeIngestParams<'a> {
 
 /// Ingest one narrative PDF.
 ///
-/// Steps: extract text (fail fast on scans — nothing archived) → optional
-/// LLM extraction + mechanical verification → archive the PDF blob (manifest
+/// Steps: extract text (fail fast on scans — nothing archived) → LLM
+/// extraction + mechanical verification → archive the PDF blob (manifest
 /// `subject` = verified date) → freeze the verified extraction as its own
 /// JSON artifact blob in the derived store → upsert index rows (document,
 /// narrative text, coded problems).
 ///
-/// Absence of an extractor (no `ANTHROPIC_API_KEY`) degrades gracefully to a
-/// text-only ingest, reported as `extraction_status: "skipped_no_extractor"`.
-/// An extractor *failure* does not: after the extractor's own in-band
-/// retries, a sustained LLM outage fails the whole ingest before anything is
-/// archived or indexed — no partial text-only state to reconcile later; the
-/// caller re-runs the ingest once the API recovers. If this is a no-extractor
-/// re-ingest of bytes already indexed from a prior *verified* extraction, the
-/// existing row is left untouched — replacing it would cascade away
-/// previously verified problems, title, and document date for no gain (the
-/// text is identical; there's nothing new to apply). The outcome is reported
-/// against the existing row's id with `title`/`document_date` left `None`,
-/// since they describe what THIS ingest extracted, not the preserved prior
-/// state (fetch that via `get_narrative`).
+/// LLM extraction is required: whether the extractor is missing entirely
+/// (no `ANTHROPIC_API_KEY`) or fails after its own bounded in-band retries,
+/// the whole ingest fails before anything is archived or indexed. There is
+/// no text-only fallback, so there is never partial state to reconcile —
+/// the caller fixes the configuration or waits out the outage, then re-runs
+/// the same ingest, which starts clean.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Extraction`] when the PDF has no text layer or cannot be
-/// parsed, or when the LLM extraction fails (nothing is persisted in either
-/// case), and [`Error::Archive`]/[`Error::Database`] on storage failures.
+/// Returns [`Error::ExtractorNotConfigured`] when no extractor is supplied,
+/// [`Error::Extraction`] when the PDF has no text layer or cannot be parsed
+/// or when the LLM extraction fails (nothing is persisted in any of these
+/// cases), and [`Error::Archive`]/[`Error::Database`] on storage failures.
 pub async fn ingest_narrative_pdf<E: LlmExtractor>(
     archive: &Archive,
     derived: &Archive,
@@ -96,19 +91,17 @@ pub async fn ingest_narrative_pdf<E: LlmExtractor>(
     //    unsupported" rather than accumulate unusable blobs.
     let text = extract_pdf_text(&content)?;
 
-    // 2. LLM extraction + verification. An extraction failure (after the
-    //    extractor's own bounded retries) fails the ingest here, before
+    // 2. LLM extraction + verification. Extraction is required: a missing
+    //    extractor (no ANTHROPIC_API_KEY) or an extraction failure (after
+    //    the extractor's own bounded retries) fails the ingest here, before
     //    anything is archived or indexed.
-    let (verified, extraction_status): (Option<VerifiedExtraction>, &str) = match extractor {
-        None => (None, "skipped_no_extractor"),
-        Some(e) => {
-            let raw = e.extract(&text).await?;
-            (Some(verify_extraction(&text, raw)), "applied")
-        }
+    let Some(extractor) = extractor else {
+        return Err(Error::ExtractorNotConfigured);
     };
+    let verified = verify_extraction(&text, extractor.extract(&text).await?);
 
-    // 3-4. Archive the PDF blob and, if applicable, freeze the verified
-    //      extraction as its own artifact blob in the derived store.
+    // 3-4. Archive the PDF blob and freeze the verified extraction as its
+    //      own artifact blob in the derived store.
     let (pdf_key, artifact) = archive_narrative_blobs(
         archive,
         derived,
@@ -116,33 +109,16 @@ pub async fn ingest_narrative_pdf<E: LlmExtractor>(
         source,
         original_filename,
         archived_at,
-        verified.as_ref(),
+        &verified,
     )
     .await?;
 
     // 5. Upsert the document row: re-ingest of the same bytes replaces the
     //    prior rows (cascade cleans narrative_texts + problems, and the FTS
-    //    delete trigger fires on the cascade) — but ONLY when this ingest
-    //    produced a freshly *verified* extraction (`extraction_status ==
-    //    "applied"`). If extraction did not run (no extractor) and a prior
-    //    row already indexes these exact bytes, the prior row is the best
-    //    knowledge we have — deleting it would cascade away a
-    //    previously verified extraction (problems, title, document_date) in
-    //    favor of a degraded text-only rebuild, even though the frozen
-    //    artifact for the earlier ingest is still in the derived store.
-    //    Keep the existing row untouched and report the degraded outcome
-    //    against it instead of replacing anything.
+    //    delete trigger fires on the cascade). This ingest always carries a
+    //    freshly verified extraction — the only kind that can reach this
+    //    point — so replacing is always an upgrade, never a downgrade.
     if let Some(existing) = fetch_source_document_by_archive_key(pool, &pdf_key).await? {
-        if extraction_status != "applied" {
-            return Ok(NarrativeIngestOutcome {
-                source_document_id: existing.id,
-                title: None,
-                document_date: None,
-                codings_indexed: 0,
-                extraction_status: extraction_status.to_owned(),
-                rejected: verified.map(|v| v.rejected).unwrap_or_default(),
-            });
-        }
         delete_source_document(pool, existing.id).await?;
     }
     let source_document_id = insert_source_document(
@@ -170,26 +146,23 @@ pub async fn ingest_narrative_pdf<E: LlmExtractor>(
     .await?;
 
     // 7. Apply the artifact (date, title, coded problems).
-    let mut codings_indexed = 0;
-    if let Some(a) = &artifact {
-        codings_indexed = apply_extraction(pool, source_document_id, a).await?;
-    }
+    let codings_indexed = apply_extraction(pool, source_document_id, &artifact).await?;
 
     Ok(NarrativeIngestOutcome {
         source_document_id,
-        title: artifact.as_ref().and_then(|a| a.title.clone()),
-        document_date: artifact.as_ref().and_then(|a| a.document_date.clone()),
+        title: artifact.title,
+        document_date: artifact.document_date,
         codings_indexed,
-        extraction_status: extraction_status.to_owned(),
-        rejected: verified.map(|v| v.rejected).unwrap_or_default(),
+        extraction_status: "applied".to_owned(),
+        rejected: verified.rejected,
     })
 }
 
-/// Archive the PDF blob and, when a verified extraction exists, freeze it as
-/// its own JSON artifact blob in the derived store, referencing the PDF's
-/// hash. Source bytes and machine derivations live in separate stores: the
-/// archive holds only bytes that arrived from outside, while the derived
-/// store holds expensive-to-recreate derivations with their own lifecycle.
+/// Archive the PDF blob and freeze its verified extraction as its own JSON
+/// artifact blob in the derived store, referencing the PDF's hash. Source
+/// bytes and machine derivations live in separate stores: the archive holds
+/// only bytes that arrived from outside, while the derived store holds
+/// expensive-to-recreate derivations with their own lifecycle.
 ///
 /// Split out of `ingest_narrative_pdf` to keep that function under the
 /// line-count lint; has no independent meaning outside steps 3-4 of that
@@ -201,15 +174,15 @@ async fn archive_narrative_blobs(
     source: &str,
     original_filename: Option<&str>,
     archived_at: OffsetDateTime,
-    verified: Option<&VerifiedExtraction>,
-) -> Result<(BlobKey, Option<ExtractionArtifact>)> {
+    verified: &VerifiedExtraction,
+) -> Result<(BlobKey, ExtractionArtifact)> {
     // 3. Archive the PDF blob. `subject` carries the verified document date
     //    so the blob is self-describing for text-only replay.
     let pdf_manifest = Manifest::new(
         source,
         NARRATIVE_PDF_KIND,
         "application/pdf",
-        verified.and_then(|v| v.document_date.clone()),
+        verified.document_date.clone(),
         archived_at,
         original_filename.map(str::to_owned),
     );
@@ -217,36 +190,34 @@ async fn archive_narrative_blobs(
 
     // 4. Freeze the verified extraction as its own artifact blob in the
     //    derived store.
-    let artifact = verified.map(|v| ExtractionArtifact {
+    let artifact = ExtractionArtifact {
         document: pdf_key.to_string(),
-        document_date: v.document_date.clone(),
-        document_date_quote: v.document_date_quote.clone(),
-        title: v.title.clone(),
-        codings: v.codings.clone(),
+        document_date: verified.document_date.clone(),
+        document_date_quote: verified.document_date_quote.clone(),
+        title: verified.title.clone(),
+        codings: verified.codings.clone(),
         extractor: ExtractorInfo {
             model: EXTRACTION_MODEL.to_owned(),
             prompt_version: PROMPT_VERSION,
         },
         extracted_at: archived_at,
-    });
-    if let Some(a) = &artifact {
-        let bytes = serde_json::to_vec(a).map_err(|err| {
-            Error::Extraction(crate::extraction::Error::InvalidResponse {
-                reason: format!("serializing artifact: {err}"),
-            })
-        })?;
-        let manifest = Manifest::new(
-            "chartpds",
-            NARRATIVE_EXTRACTION_KIND,
-            "application/json",
-            Some(pdf_key.to_string()),
-            archived_at,
-            None,
-        );
-        derived
-            .put_with_manifest(Bytes::from(bytes), manifest)
-            .await?;
-    }
+    };
+    let bytes = serde_json::to_vec(&artifact).map_err(|err| {
+        Error::Extraction(crate::extraction::Error::InvalidResponse {
+            reason: format!("serializing artifact: {err}"),
+        })
+    })?;
+    let manifest = Manifest::new(
+        "chartpds",
+        NARRATIVE_EXTRACTION_KIND,
+        "application/json",
+        Some(pdf_key.to_string()),
+        archived_at,
+        None,
+    );
+    derived
+        .put_with_manifest(Bytes::from(bytes), manifest)
+        .await?;
 
     Ok((pdf_key, artifact))
 }
@@ -444,9 +415,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn degrades_to_text_only_without_extractor() {
+    async fn no_extractor_fails_the_ingest_with_nothing_persisted() {
         let (pool, archive, derived) = fresh_pool_and_stores().await;
-        let outcome = ingest_narrative_pdf(
+        let err = ingest_narrative_pdf(
             &archive,
             &derived,
             &pool,
@@ -459,18 +430,21 @@ mod tests {
             None::<&crate::extraction::ClaudeExtractor>,
         )
         .await
-        .expect("ingest");
-        assert_eq!(outcome.extraction_status, "skipped_no_extractor");
-        assert_eq!(outcome.codings_indexed, 0);
-        // Only the PDF blob — no artifact.
-        assert_eq!(archive.list_keys().await.expect("keys").len(), 1);
+        .expect_err("missing extractor must fail the ingest");
+        assert!(matches!(err, Error::ExtractorNotConfigured));
+        assert!(
+            err.to_string().contains("ANTHROPIC_API_KEY"),
+            "error must tell the caller how to fix it: {err}"
+        );
+        // Nothing persisted anywhere: the caller was told the ingest failed,
+        // so no text-only residue may exist to diverge from that answer.
+        assert!(archive.list_keys().await.expect("keys").is_empty());
         assert!(derived.list_keys().await.expect("keys").is_empty());
-        // Text is still indexed.
-        let text = crate::index::get_narrative_text(&pool, outcome.source_document_id)
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM source_documents")
+            .fetch_one(&pool)
             .await
-            .expect("get")
-            .expect("present");
-        assert!(text.text.contains("DIAGNOSIS"));
+            .expect("count");
+        assert_eq!(count.0, 0, "nothing indexed");
     }
 
     #[tokio::test]
@@ -607,7 +581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re_ingest_without_extractor_preserves_prior_extraction() {
+    async fn no_extractor_on_reingest_fails_and_leaves_prior_state_untouched() {
         let (pool, archive, derived) = fresh_pool_and_stores().await;
         let extractor = MockExtractor(fixture_extraction());
 
@@ -629,10 +603,9 @@ mod tests {
         assert_eq!(first.codings_indexed, 1);
 
         // Re-ingest the same bytes with no extractor available (e.g. no
-        // ANTHROPIC_API_KEY). This must NOT delete the prior verified
-        // extraction — the frozen artifact and index rows from the first
-        // ingest are the best knowledge we have.
-        let second = ingest_narrative_pdf(
+        // ANTHROPIC_API_KEY). The ingest fails, and the prior verified
+        // state — problems, title, document date — must survive intact.
+        let err = ingest_narrative_pdf(
             &archive,
             &derived,
             &pool,
@@ -645,11 +618,8 @@ mod tests {
             None::<&crate::extraction::ClaudeExtractor>,
         )
         .await
-        .expect("second ingest");
-
-        assert_eq!(second.extraction_status, "skipped_no_extractor");
-        assert_eq!(second.codings_indexed, 0);
-        assert_eq!(second.source_document_id, first.source_document_id);
+        .expect_err("missing extractor must fail the re-ingest");
+        assert!(matches!(err, Error::ExtractorNotConfigured));
 
         // Prior problems row survived.
         let problems = list_problems_by_source_document(&pool, first.source_document_id)
