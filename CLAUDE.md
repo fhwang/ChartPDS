@@ -229,7 +229,7 @@ and the reasons in `rejected`.)
 Currently: `latest_by_code`, `observation_history`, `counts_per_code`,
 `current_problems`, `current_medications`, `duration_in_value_range`,
 `longest_continuous_in_value_range`, `search_narratives`, `get_narrative`,
-`observation_stats`. Each is a pure async function
+`observation_stats`, `aligned_table`, `signal_relationship`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
 The `current_problems` and `current_medications` primitives return deduped
@@ -249,6 +249,20 @@ attributes a whole run to the UTC day its first interval started (a
 midnight-crossing block lands wholly in one day). So per-day totals from the
 two tools need not reconcile for a block that straddles midnight.
 
+`duration_in_value_range`, `longest_continuous_in_value_range`, and
+`observation_stats` also accept an `episode` bucket: episodes are
+gap-tolerant chains of the coding's interval observations (detection lives
+in `queries/episodes.rs`), keyed by the episode's RFC 3339 UTC start
+instant, so a sleep period crossing midnight lands in exactly one bucket.
+`aligned_table` returns one row per bucket (day / ISO week / month /
+episode) with one value per requested coding — each column reduces via
+mean / sum / min / max / count / median or in-range interval minutes, and
+absent cells are explicit nulls. `signal_relationship` pairs two codings'
+per-bucket values with an optional lag (in buckets) and reports `n_pairs`,
+Pearson r, Spearman ρ (rank-based; robust to outliers and
+monotonic-but-nonlinear relationships), per-signal mean/sd, and optional
+per-group `y` statistics split by an `x` threshold.
+
 These are composed into named MCP tools (and later CLI subcommands)
 by the binary crate. Adding a new query: drop a new file under
 `crates/chartpds-core/src/queries/`, add a `mod` declaration and a
@@ -261,7 +275,7 @@ cache the new SQL.
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
 e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`,
 the local-FS archive at `$DIR/archive/`, and the derived store at
-`$DIR/derived/`, and serves 16 tools:
+`$DIR/derived/`, and serves 18 tools:
 
 - `ingest_record` — ingest a document (write path); `kind="ccda"` for CCDA
   XML, `kind="clinical-pdf"` for a narrative clinical PDF (see Narrative
@@ -275,13 +289,22 @@ the local-FS archive at `$DIR/archive/`, and the derived store at
   per `(system, code)`
 - `describe_codings` — value-encoding semantics for the codings ChartPDS mints
   (non-standard only; LOINC omitted as self-describing)
-- `observation_duration_in_range` — total minutes a coded signal spent in a value range
-- `observation_longest_period_in_range` — longest continuous in-range run per day
+- `observation_duration_in_range` — total minutes a coded signal spent in a
+  value range; buckets: `none` / `day` / `hour` / `episode`
+- `observation_longest_period_in_range` — longest continuous in-range run
+  per day or per episode
 - `observation_stats` — descriptive statistics (count, mean, sample sd,
   min/max, p25/p50/p75, optional threshold counts) for one coding over a
   window; `field` selects `value`, `start_time_of_day` / `end_time_of_day`
   (minutes since local noon), or `interval_minutes`; optional bucketing by
-  `day` / `week` (ISO Monday) / `month` / `day_of_week` in a request timezone
+  `day` / `week` (ISO Monday) / `month` / `day_of_week` / `episode` in a
+  request timezone
+- `observation_table` — aligned multi-coding table: one row per bucket
+  (`day` / `week` / `month` / `episode`) with one aggregated value (or
+  explicit null) per requested coding, in a single call
+- `observation_relationship` — how two codings relate over a window:
+  per-bucket pairing with optional lag (in buckets), Pearson r, Spearman ρ,
+  `n_pairs`, and optional threshold-group comparison
 - `list_problems` — current problems (diagnoses), deduped to one entry per
   code with provenance (`document_count`, `first_seen`, `last_seen`) and the
   archive's `latest_document_date`; `status` is the raw source value and is

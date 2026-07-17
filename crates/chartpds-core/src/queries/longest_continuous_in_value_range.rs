@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 use sqlx::SqlitePool;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::queries::episodes::{
+    detect_episodes, episode_index_for, fetch_all_intervals, utc_instant_key,
+};
 use crate::queries::roll_up_bucket_confidence;
 use crate::sources::DayConfidence;
 
@@ -96,6 +99,19 @@ fn utc_day(ts: OffsetDateTime) -> String {
     )
 }
 
+/// How to group longest runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongestBucket {
+    /// One bucket per UTC calendar day the run started on.
+    Day,
+    /// One bucket per detected episode: a gap-tolerant chain of the coding's
+    /// interval observations (e.g. one sleep period), keyed by the RFC 3339
+    /// UTC instant the episode began. A run crossing a calendar-day boundary
+    /// stays whole inside its episode. Every episode in the window is
+    /// reported, `0.0` when it contains no in-range run.
+    Episode,
+}
+
 /// Parameters for [`longest_continuous_in_value_range`].
 pub struct LongestContinuousParams<'a> {
     /// FHIR coding system URI.
@@ -111,8 +127,11 @@ pub struct LongestContinuousParams<'a> {
     /// Maximum `value_quantity` (inclusive).
     pub value_max: f64,
     /// Maximum gap in seconds between consecutive intervals that still counts
-    /// as continuous.
+    /// as continuous (and, for [`LongestBucket::Episode`], that still chains
+    /// intervals into one episode).
     pub gap_seconds: i64,
+    /// How to group the result.
+    pub bucket: LongestBucket,
 }
 
 /// Find the longest continuous in-range run per UTC start day.
@@ -131,6 +150,9 @@ pub async fn longest_continuous_in_value_range(
     now: OffsetDateTime,
     params: LongestContinuousParams<'_>,
 ) -> Result<LongestContinuousInRange, sqlx::Error> {
+    if params.bucket == LongestBucket::Episode {
+        return longest_by_episode(pool, now, &params).await;
+    }
     let by_day = longest_by_day(pool, &params).await?;
     let confidence_by_bucket = bucket_confidence_for(pool, now, &params).await?;
 
@@ -167,6 +189,7 @@ async fn longest_by_day(
         value_min,
         value_max,
         gap_seconds,
+        bucket: _,
     } = params;
     let rows = sqlx::query!(
         r#"
@@ -206,6 +229,73 @@ async fn longest_by_day(
     Ok(by_day)
 }
 
+/// Episode path: chain ALL of the coding's intervals into episodes, walk the
+/// in-range intervals into runs, and report each episode's longest run.
+async fn longest_by_episode(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    params: &LongestContinuousParams<'_>,
+) -> Result<LongestContinuousInRange, sqlx::Error> {
+    let all = fetch_all_intervals(
+        pool,
+        params.coding_system,
+        params.coding_code,
+        params.start,
+        params.end,
+    )
+    .await?;
+    let intervals: Vec<(OffsetDateTime, OffsetDateTime)> =
+        all.iter().map(|r| (r.start, r.end)).collect();
+    let episodes = detect_episodes(&intervals, params.gap_seconds);
+
+    let in_range: Vec<(OffsetDateTime, OffsetDateTime)> = all
+        .iter()
+        .filter(|r| {
+            r.value
+                .is_some_and(|v| v >= params.value_min && v <= params.value_max)
+        })
+        .map(|r| (r.start, r.end))
+        .collect();
+    let mut longest = vec![0.0f64; episodes.len()];
+    for run in runs(&in_range, params.gap_seconds) {
+        if let Some(idx) = episode_index_for(&episodes, run.start) {
+            longest[idx] = longest[idx].max(run.minutes);
+        }
+    }
+
+    let contributions: Vec<(String, String, Option<String>)> = all
+        .iter()
+        .filter_map(|r| {
+            episode_index_for(&episodes, r.start).map(|idx| {
+                (
+                    utc_instant_key(episodes[idx].start),
+                    r.source.clone(),
+                    r.document_date.clone(),
+                )
+            })
+        })
+        .collect();
+    let confidence_by_bucket = roll_up_bucket_confidence(pool, now, &contributions).await?;
+
+    Ok(LongestContinuousInRange {
+        per_bucket: episodes
+            .iter()
+            .zip(longest)
+            .map(|(episode, longest_minutes)| {
+                let label = utc_instant_key(episode.start);
+                BucketLongest {
+                    confidence: confidence_by_bucket
+                        .get(&label)
+                        .copied()
+                        .unwrap_or(DayConfidence::Confirmed),
+                    bucket_start: label,
+                    longest_minutes,
+                }
+            })
+            .collect(),
+    })
+}
+
 /// Roll up per-bucket confidence for the same filter as the interval fetch
 /// in [`longest_continuous_in_value_range`].
 ///
@@ -226,6 +316,7 @@ async fn bucket_confidence_for(
         value_min,
         value_max,
         gap_seconds: _,
+        bucket: _,
     } = params;
     let contributions = crate::queries::day_confidence::contributions_for_filter(
         pool,
@@ -352,6 +443,7 @@ mod tests {
                 value_min: 1.0,
                 value_max: 4.0,
                 gap_seconds: 0,
+                bucket: LongestBucket::Day,
             },
         )
         .await
@@ -408,6 +500,7 @@ mod tests {
                 value_min: 1.0,
                 value_max: 4.0,
                 gap_seconds: 0,
+                bucket: LongestBucket::Day,
             },
         )
         .await
@@ -418,6 +511,125 @@ mod tests {
                 per_bucket: vec![BucketLongest {
                     bucket_start: "2026-01-01".to_string(),
                     longest_minutes: 5.0,
+                    confidence: DayConfidence::Confirmed,
+                }],
+            }
+        );
+    }
+
+    /// Night A: contiguous epochs 23:50 -> 00:10 with a deep (3.0) run of
+    /// 23:55 -> 00:05 crossing UTC midnight. Night B: one deep 5-min epoch.
+    fn deep_run_nights() -> [IntervalObsSpec; 5] {
+        let epoch = |start, end, stage| IntervalObsSpec {
+            coding_system: AASM_SLEEP_STAGE_SYSTEM,
+            coding_code: AASM_SLEEP_STAGE_CODE,
+            effective_start: start,
+            effective_end: end,
+            value_quantity: stage,
+        };
+        [
+            epoch(
+                datetime!(2026-06-26 23:50:00 UTC),
+                datetime!(2026-06-26 23:55:00 UTC),
+                2.0,
+            ),
+            epoch(
+                datetime!(2026-06-26 23:55:00 UTC),
+                datetime!(2026-06-27 00:00:00 UTC),
+                3.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 00:00:00 UTC),
+                datetime!(2026-06-27 00:05:00 UTC),
+                3.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 00:05:00 UTC),
+                datetime!(2026-06-27 00:10:00 UTC),
+                2.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 23:00:00 UTC),
+                datetime!(2026-06-27 23:05:00 UTC),
+                3.0,
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_keeps_midnight_crossing_run_whole() {
+        let (pool, _) = seed_interval_observations(&deep_run_nights()).await;
+        let result = longest_continuous_in_value_range(
+            &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
+            LongestContinuousParams {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                start: datetime!(2026-06-26 00:00:00 UTC),
+                end: datetime!(2026-06-29 00:00:00 UTC),
+                value_min: 3.0,
+                value_max: 3.0,
+                gap_seconds: 0,
+                bucket: LongestBucket::Episode,
+            },
+        )
+        .await
+        .expect("query");
+        // The 10-min deep run straddles midnight but stays whole inside
+        // night A's episode bucket; night B's episode reports its 5-min run.
+        assert_eq!(
+            result,
+            LongestContinuousInRange {
+                per_bucket: vec![
+                    BucketLongest {
+                        bucket_start: "2026-06-26T23:50:00Z".to_string(),
+                        longest_minutes: 10.0,
+                        confidence: DayConfidence::Confirmed,
+                    },
+                    BucketLongest {
+                        bucket_start: "2026-06-27T23:00:00Z".to_string(),
+                        longest_minutes: 5.0,
+                        confidence: DayConfidence::Confirmed,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_reports_runless_episode_as_zero() {
+        // One night of purely light (2.0) sleep: the episode exists but has
+        // no deep run.
+        let specs = [IntervalObsSpec {
+            coding_system: AASM_SLEEP_STAGE_SYSTEM,
+            coding_code: AASM_SLEEP_STAGE_CODE,
+            effective_start: datetime!(2026-06-27 01:00:00 UTC),
+            effective_end: datetime!(2026-06-27 01:05:00 UTC),
+            value_quantity: 2.0,
+        }];
+        let (pool, _) = seed_interval_observations(&specs).await;
+        let result = longest_continuous_in_value_range(
+            &pool,
+            datetime!(2026-07-01 00:00:00 UTC),
+            LongestContinuousParams {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                start: datetime!(2026-06-26 00:00:00 UTC),
+                end: datetime!(2026-06-29 00:00:00 UTC),
+                value_min: 3.0,
+                value_max: 3.0,
+                gap_seconds: 0,
+                bucket: LongestBucket::Episode,
+            },
+        )
+        .await
+        .expect("query");
+        assert_eq!(
+            result,
+            LongestContinuousInRange {
+                per_bucket: vec![BucketLongest {
+                    bucket_start: "2026-06-27T01:00:00Z".to_string(),
+                    longest_minutes: 0.0,
                     confidence: DayConfidence::Confirmed,
                 }],
             }

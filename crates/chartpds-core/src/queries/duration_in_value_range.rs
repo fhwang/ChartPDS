@@ -17,6 +17,9 @@ use sqlx::SqlitePool;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
+use crate::queries::episodes::{
+    detect_episodes, episode_index_for, fetch_all_intervals, utc_instant_key,
+};
 use crate::queries::roll_up_bucket_confidence;
 use crate::sources::DayConfidence;
 
@@ -29,6 +32,12 @@ pub enum Bucket {
     Day,
     /// One aggregate per clock hour (local to `timezone`, else UTC).
     Hour,
+    /// One aggregate per detected episode: a gap-tolerant chain of the
+    /// coding's interval observations (e.g. one sleep period), keyed by the
+    /// RFC 3339 UTC instant the episode began. An episode crossing a
+    /// calendar-day boundary contributes to exactly one bucket. Every
+    /// episode in the window is reported, `0.0` when nothing was in range.
+    Episode,
 }
 
 /// Failure modes of [`duration_in_value_range`].
@@ -179,6 +188,9 @@ pub struct DurationInValueRangeParams<'a> {
     pub bucket: Bucket,
     /// IANA timezone for `day`/`hour` bucket boundaries; `None` = UTC.
     pub timezone: Option<&'a str>,
+    /// Maximum gap in seconds between consecutive intervals that still chains
+    /// them into one episode. Only used by [`Bucket::Episode`].
+    pub gap_seconds: i64,
 }
 
 /// Shared filter for the interval queries: coding + half-open window + value range.
@@ -223,6 +235,7 @@ pub async fn duration_in_value_range(
         value_max,
         bucket,
         timezone,
+        gap_seconds,
     } = params;
     let query = RangeQuery {
         coding_system,
@@ -243,7 +256,72 @@ pub async fn duration_in_value_range(
         (Bucket::Hour, _) => {
             local_bucketed(pool, now, &query, LocalGranularity::Hour, timezone).await
         }
+        (Bucket::Episode, _) => episode_bucketed(pool, now, &query, gap_seconds).await,
     }
+}
+
+/// Episode path: chain ALL of the coding's intervals (no value filter) into
+/// episodes, then report the in-range minutes inside each episode.
+async fn episode_bucketed(
+    pool: &SqlitePool,
+    now: OffsetDateTime,
+    query: &RangeQuery<'_>,
+    gap_seconds: i64,
+) -> Result<DurationInRange, DurationInRangeError> {
+    let rows = fetch_all_intervals(
+        pool,
+        query.coding_system,
+        query.coding_code,
+        query.start,
+        query.end,
+    )
+    .await?;
+    let intervals: Vec<(OffsetDateTime, OffsetDateTime)> =
+        rows.iter().map(|r| (r.start, r.end)).collect();
+    let episodes = detect_episodes(&intervals, gap_seconds);
+
+    let mut in_range_seconds = vec![0i64; episodes.len()];
+    let mut contributions: Vec<(String, String, Option<String>)> = Vec::new();
+    for row in &rows {
+        let Some(idx) = episode_index_for(&episodes, row.start) else {
+            continue;
+        };
+        contributions.push((
+            utc_instant_key(episodes[idx].start),
+            row.source.clone(),
+            row.document_date.clone(),
+        ));
+        if row
+            .value
+            .is_some_and(|v| v >= query.value_min && v <= query.value_max)
+        {
+            in_range_seconds[idx] += (row.end - row.start).whole_seconds();
+        }
+    }
+    let confidence_by_bucket = roll_up_bucket_confidence(pool, now, &contributions).await?;
+
+    Ok(DurationInRange::Buckets {
+        per_bucket: episodes
+            .iter()
+            .zip(in_range_seconds)
+            .map(|(episode, seconds)| {
+                let label = utc_instant_key(episode.start);
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "seconds for realistic observation windows fit f64 without loss"
+                )]
+                let total_minutes = seconds as f64 / 60.0;
+                BucketMinutes {
+                    confidence: confidence_by_bucket
+                        .get(&label)
+                        .copied()
+                        .unwrap_or(DayConfidence::Confirmed),
+                    bucket_start: label,
+                    total_minutes,
+                }
+            })
+            .collect(),
+    })
 }
 
 /// SQL fast path for [`Bucket::None`]: a single total, summed in `SQLite`.
@@ -511,6 +589,7 @@ mod tests {
                 value_max: 118.0,
                 bucket: Bucket::None,
                 timezone: None,
+                gap_seconds: 0,
             },
         )
         .await
@@ -534,6 +613,7 @@ mod tests {
                 value_max: 140.0,
                 bucket: Bucket::Day,
                 timezone: None,
+                gap_seconds: 0,
             },
         )
         .await
@@ -581,6 +661,7 @@ mod tests {
                 value_max: 4.0,
                 bucket: Bucket::None,
                 timezone: None,
+                gap_seconds: 0,
             },
         )
         .await
@@ -604,6 +685,7 @@ mod tests {
                 value_max: 140.0,
                 bucket: Bucket::None,
                 timezone: None,
+                gap_seconds: 0,
             },
         )
         .await
@@ -626,6 +708,7 @@ mod tests {
                 value_max: 0.0,
                 bucket: Bucket::Hour,
                 timezone: None,
+                gap_seconds: 0,
             },
         )
         .await
@@ -664,6 +747,7 @@ mod tests {
                 value_max: 0.0,
                 bucket: Bucket::Hour,
                 timezone: Some("America/New_York"),
+                gap_seconds: 0,
             },
         )
         .await
@@ -703,6 +787,7 @@ mod tests {
                 value_max: 0.0,
                 bucket: Bucket::Day,
                 timezone: Some("America/New_York"),
+                gap_seconds: 0,
             },
         )
         .await
@@ -853,5 +938,139 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Two sleep nights of contiguous 5-min epochs (n3 = 3.0 deep, n2 = 2.0
+    /// light). Night A crosses UTC midnight; night B has no deep sleep.
+    fn two_sleep_nights() -> [IntervalObsSpec; 6] {
+        let epoch = |start, end, stage| IntervalObsSpec {
+            coding_system: AASM_SLEEP_STAGE_SYSTEM,
+            coding_code: AASM_SLEEP_STAGE_CODE,
+            effective_start: start,
+            effective_end: end,
+            value_quantity: stage,
+        };
+        [
+            epoch(
+                datetime!(2026-06-26 23:50:00 UTC),
+                datetime!(2026-06-26 23:55:00 UTC),
+                3.0,
+            ),
+            epoch(
+                datetime!(2026-06-26 23:55:00 UTC),
+                datetime!(2026-06-27 00:00:00 UTC),
+                2.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 00:00:00 UTC),
+                datetime!(2026-06-27 00:05:00 UTC),
+                3.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 00:05:00 UTC),
+                datetime!(2026-06-27 00:10:00 UTC),
+                2.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 23:00:00 UTC),
+                datetime!(2026-06-27 23:05:00 UTC),
+                2.0,
+            ),
+            epoch(
+                datetime!(2026-06-27 23:05:00 UTC),
+                datetime!(2026-06-27 23:10:00 UTC),
+                2.0,
+            ),
+        ]
+    }
+
+    fn episode_params<'a>(gap_seconds: i64) -> DurationInValueRangeParams<'a> {
+        DurationInValueRangeParams {
+            coding_system: AASM_SLEEP_STAGE_SYSTEM,
+            coding_code: AASM_SLEEP_STAGE_CODE,
+            start: datetime!(2026-06-26 00:00:00 UTC),
+            end: datetime!(2026-06-29 00:00:00 UTC),
+            value_min: 3.0,
+            value_max: 3.0,
+            bucket: Bucket::Episode,
+            timezone: None,
+            gap_seconds,
+        }
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_keeps_midnight_crossing_night_in_one_bucket() {
+        let (pool, _) = seed_interval_observations(&two_sleep_nights()).await;
+        let result =
+            duration_in_value_range(&pool, datetime!(2026-07-01 00:00:00 UTC), episode_params(0))
+                .await
+                .expect("query");
+        // Night A: 10 deep minutes, 5 before and 5 after UTC midnight, all in
+        // ONE bucket keyed by the episode's start instant. Night B: reported
+        // as an episode even though it has zero in-range minutes.
+        assert_eq!(
+            result,
+            DurationInRange::Buckets {
+                per_bucket: vec![
+                    BucketMinutes {
+                        bucket_start: "2026-06-26T23:50:00Z".into(),
+                        total_minutes: 10.0,
+                        confidence: DayConfidence::Confirmed,
+                    },
+                    BucketMinutes {
+                        bucket_start: "2026-06-27T23:00:00Z".into(),
+                        total_minutes: 0.0,
+                        confidence: DayConfidence::Confirmed,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn episode_gap_seconds_bridges_missing_epochs() {
+        // Two deep epochs 5 minutes apart: gap 300s chains one episode,
+        // gap 0 splits two.
+        let specs = [
+            IntervalObsSpec {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                effective_start: datetime!(2026-06-27 00:00:00 UTC),
+                effective_end: datetime!(2026-06-27 00:05:00 UTC),
+                value_quantity: 3.0,
+            },
+            IntervalObsSpec {
+                coding_system: AASM_SLEEP_STAGE_SYSTEM,
+                coding_code: AASM_SLEEP_STAGE_CODE,
+                effective_start: datetime!(2026-06-27 00:10:00 UTC),
+                effective_end: datetime!(2026-06-27 00:15:00 UTC),
+                value_quantity: 3.0,
+            },
+        ];
+        let (pool, _) = seed_interval_observations(&specs).await;
+        let now = datetime!(2026-07-01 00:00:00 UTC);
+
+        let bridged = duration_in_value_range(&pool, now, episode_params(300))
+            .await
+            .expect("query");
+        let DurationInRange::Buckets { per_bucket } = bridged else {
+            panic!("expected buckets");
+        };
+        assert_eq!(
+            per_bucket,
+            vec![BucketMinutes {
+                bucket_start: "2026-06-27T00:00:00Z".into(),
+                total_minutes: 10.0,
+                confidence: DayConfidence::Confirmed,
+            }]
+        );
+
+        let split = duration_in_value_range(&pool, now, episode_params(0))
+            .await
+            .expect("query");
+        let DurationInRange::Buckets { per_bucket } = split else {
+            panic!("expected buckets");
+        };
+        assert_eq!(per_bucket.len(), 2);
     }
 }
