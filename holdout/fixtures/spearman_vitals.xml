@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Synthetic CCDA fixture for the ChartPDS holdout regression suite.
+  Entirely fabricated test data: no real patient, no PHI.
+
+  Two vitals series that rise together monotonically but NOT linearly,
+  so rank and linear correlation give different answers:
+    - body weight (29463-7) on Jan 15/16/17/18: 380 / 400 / 420 / 440
+    - heart rate (8867-4) on Jan 15/16/17/18: 60 / 61 / 63 / 80
+  Ranks agree exactly (1,2,3,4 vs 1,2,3,4) -> Spearman rho = 1 exactly.
+  Raw deviations (-30,-10,10,30) x (-6,-5,-3,14) -> Pearson
+  r = 620 / sqrt(2000*266) ~ 0.85, visibly below 1. A correct
+  rank-based spearman_r must report 1.0 here; wiring it to the raw
+  Pearson value is the regression this fixture exists to catch.
+-->
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <templateId root="2.16.840.1.113883.10.20.22.1.1" extension="2015-08-01"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.2" extension="2015-08-01"/>
+  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1" displayName="Summary of episode note"/>
+  <title>Holdout Synthetic Spearman Vitals</title>
+  <effectiveTime value="20260118120000+0000"/>
+  <component>
+    <structuredBody>
+      <component>
+        <section>
+          <templateId root="2.16.840.1.113883.10.20.22.2.4.1" extension="2015-08-01"/>
+          <code code="8716-3" codeSystem="2.16.840.1.113883.6.1" displayName="Vital signs"/>
+          <title>Vital Signs</title>
+          <entry>
+            <organizer classCode="CLUSTER" moodCode="EVN">
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260115021600+0000"/>
+                  <value xsi:type="PQ" value="380" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260116021600+0000"/>
+                  <value xsi:type="PQ" value="400" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260117021600+0000"/>
+                  <value xsi:type="PQ" value="420" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="29463-7" codeSystem="2.16.840.1.113883.6.1" displayName="Body Weight"/>
+                  <effectiveTime value="20260118021600+0000"/>
+                  <value xsi:type="PQ" value="440" unit="[lb_av]"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="8867-4" codeSystem="2.16.840.1.113883.6.1" displayName="Heart Rate"/>
+                  <effectiveTime value="20260115022000+0000"/>
+                  <value xsi:type="PQ" value="60" unit="/min"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="8867-4" codeSystem="2.16.840.1.113883.6.1" displayName="Heart Rate"/>
+                  <effectiveTime value="20260116022000+0000"/>
+                  <value xsi:type="PQ" value="61" unit="/min"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="8867-4" codeSystem="2.16.840.1.113883.6.1" displayName="Heart Rate"/>
+                  <effectiveTime value="20260117022000+0000"/>
+                  <value xsi:type="PQ" value="63" unit="/min"/>
+                </observation>
+              </component>
+              <component>
+                <observation classCode="OBS" moodCode="EVN">
+                  <code code="8867-4" codeSystem="2.16.840.1.113883.6.1" displayName="Heart Rate"/>
+                  <effectiveTime value="20260118022000+0000"/>
+                  <value xsi:type="PQ" value="80" unit="/min"/>
+                </observation>
+              </component>
+            </organizer>
+          </entry>
+        </section>
+      </component>
+    </structuredBody>
+  </component>
+</ClinicalDocument>
