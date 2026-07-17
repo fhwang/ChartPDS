@@ -14,6 +14,7 @@ use jiff::{Span, Timestamp};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
+use crate::queries::episodes::{detect_episodes, episode_index_for, utc_instant_key};
 use crate::queries::roll_up_bucket_confidence;
 use crate::sources::DayConfidence;
 
@@ -46,6 +47,11 @@ pub enum StatsBucket {
     Month,
     /// Per day of week, keyed `mon` … `sun` (output Monday-first).
     DayOfWeek,
+    /// Per detected episode: a gap-tolerant chain of the coding's own
+    /// observations (intervals, or points when `effective_end` is null),
+    /// keyed by the RFC 3339 UTC instant the episode began. An episode
+    /// crossing a calendar-day boundary contributes to exactly one bucket.
+    Episode,
 }
 
 /// Failure modes of [`observation_stats`].
@@ -146,19 +152,25 @@ pub struct ObservationStatsParams<'a> {
     pub timezone: Option<&'a str>,
     /// Optional thresholds; each reports counts below / at-or-above.
     pub thresholds: Option<&'a [f64]>,
+    /// Maximum gap in seconds between consecutive observations that still
+    /// chains them into one episode. Only used by [`StatsBucket::Episode`].
+    pub gap_seconds: i64,
 }
 
 /// One fetched observation row plus its document's confidence keys.
-struct ObsRow {
-    effective_start: OffsetDateTime,
-    effective_end: Option<OffsetDateTime>,
-    value_quantity: Option<f64>,
-    source: String,
-    document_date: Option<String>,
+///
+/// `pub(crate)` because `aligned_table` reuses the same fetch + field
+/// extraction for its column machinery.
+pub(crate) struct ObsRow {
+    pub(crate) effective_start: OffsetDateTime,
+    pub(crate) effective_end: Option<OffsetDateTime>,
+    pub(crate) value_quantity: Option<f64>,
+    pub(crate) source: String,
+    pub(crate) document_date: Option<String>,
 }
 
 /// The requested per-observation number, or `None` if the row lacks the field.
-fn field_value(
+pub(crate) fn field_value(
     row: &ObsRow,
     field: StatsField,
     tz: &TimeZone,
@@ -210,7 +222,29 @@ pub async fn observation_stats(
             .map_err(|_| ObservationStatsError::InvalidTimezone(name.to_string()))?,
         None => TimeZone::UTC,
     };
-    let rows = fetch_rows(pool, &params).await?;
+    let rows = fetch_rows(
+        pool,
+        params.coding_system,
+        params.coding_code,
+        params.start,
+        params.end,
+    )
+    .await?;
+
+    // For episode buckets, chain the (start-ordered) rows themselves into
+    // episodes; a row without an end is a point interval.
+    let episodes = (params.bucket == StatsBucket::Episode).then(|| {
+        let intervals: Vec<(OffsetDateTime, OffsetDateTime)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.effective_start,
+                    r.effective_end.unwrap_or(r.effective_start),
+                )
+            })
+            .collect();
+        detect_episodes(&intervals, params.gap_seconds)
+    });
 
     let mut grouped: BTreeMap<(u8, String), Vec<f64>> = BTreeMap::new();
     let mut contributions: Vec<(String, String, Option<String>)> = Vec::new();
@@ -218,7 +252,15 @@ pub async fn observation_stats(
         let Some(value) = field_value(row, params.field, &tz)? else {
             continue;
         };
-        let (idx, label) = bucket_key(row.effective_start, params.bucket, &tz)?;
+        let (idx, label) = match &episodes {
+            Some(eps) => {
+                let Some(i) = episode_index_for(eps, row.effective_start) else {
+                    continue;
+                };
+                (0, utc_instant_key(eps[i].start))
+            }
+            None => bucket_key(row.effective_start, params.bucket, &tz)?,
+        };
         contributions.push((label.clone(), row.source.clone(), row.document_date.clone()));
         grouped.entry((idx, label)).or_default().push(value);
     }
@@ -252,9 +294,12 @@ pub async fn observation_stats(
 
 /// Fetch every matching row (with its document's confidence keys) for the
 /// coding + window filter.
-async fn fetch_rows(
+pub(crate) async fn fetch_rows(
     pool: &SqlitePool,
-    params: &ObservationStatsParams<'_>,
+    coding_system: &str,
+    coding_code: &str,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
 ) -> Result<Vec<ObsRow>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
@@ -271,10 +316,10 @@ async fn fetch_rows(
           AND o.effective_start < ?
         ORDER BY o.effective_start
         "#,
-        params.coding_system,
-        params.coding_code,
-        params.start,
-        params.end,
+        coding_system,
+        coding_code,
+        start,
+        end,
     )
     .fetch_all(pool)
     .await?;
@@ -317,7 +362,7 @@ fn minutes_since_noon(dt: OffsetDateTime, tz: &TimeZone) -> Result<f64, Observat
 /// The `u8` prefix keeps `day_of_week` buckets in Monday-first order inside a
 /// `BTreeMap`; it is 0 for every other bucket kind, whose labels already sort
 /// chronologically.
-fn bucket_key(
+pub(crate) fn bucket_key(
     dt: OffsetDateTime,
     bucket: StatsBucket,
     tz: &TimeZone,
@@ -343,12 +388,15 @@ fn bucket_key(
                 .map_err(|err| ObservationStatsError::Internal(err.to_string()))?;
             Ok((idx, LABELS[usize::from(idx)].to_string()))
         }
+        StatsBucket::Episode => Err(ObservationStatsError::Internal(
+            "episode buckets are not calendar buckets".to_string(),
+        )),
     }
 }
 
 /// `p`-th percentile (`0.0..=1.0`) of an ascending-sorted slice, by linear
 /// interpolation between closest ranks (R type 7). `None` when empty.
-fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
+pub(crate) fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     let last = sorted.len().checked_sub(1)?;
     #[allow(
         clippy::cast_precision_loss,
@@ -611,6 +659,7 @@ mod tests {
             bucket,
             timezone: None,
             thresholds: None,
+            gap_seconds: 0,
         }
     }
 
@@ -883,6 +932,73 @@ mod tests {
                 n_at_or_above: 1,
             }])
         );
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_groups_interval_stats_per_episode() {
+        // Night A: two contiguous 5-min epochs crossing UTC midnight.
+        // Night B: one 5-min epoch the next evening.
+        let (pool, _) = seed_interval_observations(&[
+            IntervalObsSpec {
+                coding_system: "http://loinc.org",
+                coding_code: "93832-4",
+                effective_start: datetime!(2026-01-01 23:55:00 UTC),
+                effective_end: datetime!(2026-01-02 00:00:00 UTC),
+                value_quantity: 1.0,
+            },
+            IntervalObsSpec {
+                coding_system: "http://loinc.org",
+                coding_code: "93832-4",
+                effective_start: datetime!(2026-01-02 00:00:00 UTC),
+                effective_end: datetime!(2026-01-02 00:05:00 UTC),
+                value_quantity: 2.0,
+            },
+            IntervalObsSpec {
+                coding_system: "http://loinc.org",
+                coding_code: "93832-4",
+                effective_start: datetime!(2026-01-02 23:00:00 UTC),
+                effective_end: datetime!(2026-01-02 23:05:00 UTC),
+                value_quantity: 5.0,
+            },
+        ])
+        .await;
+        let result = observation_stats(
+            &pool,
+            NOW,
+            base_params(StatsField::Value, StatsBucket::Episode),
+        )
+        .await
+        .expect("query");
+        let buckets = expect_buckets(result);
+        // The midnight-crossing pair stays in ONE bucket keyed by its start.
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].bucket_key, "2026-01-01T23:55:00Z");
+        assert_eq!(buckets[0].stats.count, 2);
+        approx(buckets[0].stats.mean, 1.5);
+        assert_eq!(buckets[1].bucket_key, "2026-01-02T23:00:00Z");
+        assert_eq!(buckets[1].stats.count, 1);
+        approx(buckets[1].stats.mean, 5.0);
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_treats_point_rows_as_their_own_episodes() {
+        // Point observations (no effective_end) with gap 0: each is its own
+        // episode keyed by its start instant.
+        let (pool, _) = seed_observations(&nightly_specs()).await;
+        let result = observation_stats(
+            &pool,
+            NOW,
+            base_params(StatsField::Value, StatsBucket::Episode),
+        )
+        .await
+        .expect("query");
+        let buckets = expect_buckets(result);
+        // Third spec has no value_quantity, so only two buckets have values.
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].bucket_key, "2026-01-01T07:00:00Z");
+        assert_eq!(buckets[0].stats.count, 1);
+        assert_eq!(buckets[1].bucket_key, "2026-01-02T07:00:00Z");
+        assert_eq!(buckets[1].stats.count, 1);
     }
 
     #[tokio::test]

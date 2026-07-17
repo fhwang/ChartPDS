@@ -120,11 +120,16 @@ pub(crate) struct ObservationDurationInRangeArgs {
     pub(crate) value_min: f64,
     /// Inclusive upper bound on `value_quantity`.
     pub(crate) value_max: f64,
-    /// Bucketing: `"none"` (default, single total) or `"day"` (per UTC day).
+    /// Bucketing: `"none"` (default, single total), `"day"` (per UTC day),
+    /// `"hour"`, or `"episode"` (per gap-tolerant chain of the coding's
+    /// intervals, e.g. one sleep period).
     pub(crate) bucket: Option<String>,
     /// IANA timezone (e.g. `"America/New_York"`) for `day`/`hour` bucket
     /// boundaries. Omit for UTC (default). No-op for `bucket:"none"`.
     pub(crate) timezone: Option<String>,
+    /// For `bucket:"episode"`: allowed gap, in seconds, between consecutive
+    /// intervals that still chains them into one episode. Defaults to 0.
+    pub(crate) gap_seconds: Option<i64>,
 }
 
 /// Arguments for the `observation_longest_period_in_range` tool.
@@ -140,7 +145,8 @@ pub(crate) struct ObservationLongestPeriodInRangeArgs {
     pub(crate) value_min: f64,
     /// Inclusive upper bound on `value_quantity`.
     pub(crate) value_max: f64,
-    /// Bucketing: currently only `"day"` (the default) is supported.
+    /// Bucketing: `"day"` (default, per UTC start day) or `"episode"` (per
+    /// gap-tolerant chain of the coding's intervals, e.g. one sleep period).
     pub(crate) bucket: Option<String>,
     /// Allowed gap, in seconds, between consecutive in-range intervals before a
     /// run breaks. Defaults to 0.
@@ -161,13 +167,201 @@ pub(crate) struct ObservationStatsArgs {
     /// `"interval_minutes"`.
     pub(crate) field: Option<String>,
     /// Bucketing: `"none"` (default), `"day"`, `"week"` (ISO, keyed by
-    /// Monday), `"month"`, or `"day_of_week"` (`mon` … `sun`).
+    /// Monday), `"month"`, `"day_of_week"` (`mon` … `sun`), or `"episode"`
+    /// (per gap-tolerant chain of the coding's observations, e.g. one sleep
+    /// period, keyed by the episode's RFC 3339 UTC start instant).
     pub(crate) bucket: Option<String>,
     /// IANA timezone (e.g. `"America/New_York"`) governing bucket
     /// boundaries and time-of-day derivation. Omit for UTC.
     pub(crate) timezone: Option<String>,
     /// Optional thresholds; each reports counts below / at-or-above.
     pub(crate) thresholds: Option<Vec<f64>>,
+    /// For `bucket:"episode"`: allowed gap, in seconds, between consecutive
+    /// observations that still chains them into one episode. Defaults to 0.
+    pub(crate) gap_seconds: Option<i64>,
+}
+
+/// One requested column for the `observation_table` and
+/// `observation_relationship` tools.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct TableColumnArgs {
+    /// Coding to aggregate over.
+    pub(crate) coding: Coding,
+    /// Aggregate: `"mean"` (default), `"sum"`, `"min"`, `"max"`, `"count"`,
+    /// `"median"`, or `"duration_in_range"` (minutes the coding's intervals
+    /// spent inside `[value_min, value_max]`).
+    pub(crate) aggregate: Option<String>,
+    /// Field the value aggregates operate on: `"value"` (default),
+    /// `"start_time_of_day"`, `"end_time_of_day"`, or `"interval_minutes"`.
+    /// Ignored by `"duration_in_range"`.
+    pub(crate) field: Option<String>,
+    /// Minimum `value_quantity` (inclusive). Required for (and only valid
+    /// with) `aggregate:"duration_in_range"`.
+    pub(crate) value_min: Option<f64>,
+    /// Maximum `value_quantity` (inclusive). Required for (and only valid
+    /// with) `aggregate:"duration_in_range"`.
+    pub(crate) value_max: Option<f64>,
+}
+
+/// Episode definition for episode-bucketed tables.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct TableEpisodeArgs {
+    /// Coding whose interval observations define the episodes (e.g. the
+    /// AASM sleep-stage coding for sleep periods).
+    pub(crate) coding: Coding,
+    /// Allowed gap, in seconds, between consecutive intervals that still
+    /// chains them into one episode. Defaults to 0.
+    pub(crate) gap_seconds: Option<i64>,
+}
+
+/// Arguments for the `observation_table` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct ObservationTableArgs {
+    /// Requested columns, in output order.
+    pub(crate) columns: Vec<TableColumnArgs>,
+    /// Inclusive start of the time window (RFC 3339).
+    pub(crate) start: String,
+    /// Exclusive end of the time window (RFC 3339).
+    pub(crate) end: String,
+    /// Bucketing: `"day"` (default), `"week"` (ISO, keyed by Monday),
+    /// `"month"`, or `"episode"`.
+    pub(crate) bucket: Option<String>,
+    /// IANA timezone (e.g. `"America/New_York"`) governing calendar bucket
+    /// boundaries and time-of-day fields. Omit for UTC.
+    pub(crate) timezone: Option<String>,
+    /// Episode definition; required when `bucket` is `"episode"`.
+    pub(crate) episode: Option<TableEpisodeArgs>,
+}
+
+/// Arguments for the `observation_relationship` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct ObservationRelationshipArgs {
+    /// The first signal (the "exposure"), e.g. daily activity.
+    pub(crate) x: TableColumnArgs,
+    /// The second signal (the "outcome"), e.g. nightly sleep.
+    pub(crate) y: TableColumnArgs,
+    /// Inclusive start of the time window (RFC 3339).
+    pub(crate) start: String,
+    /// Exclusive end of the time window (RFC 3339).
+    pub(crate) end: String,
+    /// Bucketing: `"day"` (default), `"week"` (ISO), or `"month"`.
+    pub(crate) bucket: Option<String>,
+    /// IANA timezone governing bucket boundaries. Omit for UTC.
+    pub(crate) timezone: Option<String>,
+    /// Pair `x` at bucket `t` with `y` at bucket `t + lag` (in buckets).
+    /// Defaults to 0 (same bucket); `1` pairs each `x` with the following
+    /// bucket's `y`. May be negative.
+    pub(crate) lag: Option<i64>,
+    /// Optional threshold on `x`: also report `y` summary statistics for
+    /// pairs with `x` strictly below vs. at-or-above it.
+    pub(crate) threshold: Option<f64>,
+}
+
+/// Parse a column's aggregate/field strings into a core [`ColumnSpec`],
+/// validating the `duration_in_range` value-bound rules.
+///
+/// [`ColumnSpec`]: chartpds_core::queries::ColumnSpec
+fn parse_column(
+    args: &TableColumnArgs,
+) -> Result<chartpds_core::queries::ColumnSpec<'_>, McpError> {
+    let aggregate = match args.aggregate.as_deref() {
+        Some("duration_in_range") => {
+            let (Some(value_min), Some(value_max)) = (args.value_min, args.value_max) else {
+                return Err(McpError::invalid_params(
+                    "aggregate \"duration_in_range\" requires value_min and value_max".to_string(),
+                    None,
+                ));
+            };
+            chartpds_core::queries::ColumnAggregate::DurationInRange {
+                value_min,
+                value_max,
+            }
+        }
+        other => {
+            if args.value_min.is_some() || args.value_max.is_some() {
+                return Err(McpError::invalid_params(
+                    "value_min/value_max are only valid with aggregate \"duration_in_range\""
+                        .to_string(),
+                    None,
+                ));
+            }
+            match other {
+                None | Some("mean") => chartpds_core::queries::ColumnAggregate::Mean,
+                Some("sum") => chartpds_core::queries::ColumnAggregate::Sum,
+                Some("min") => chartpds_core::queries::ColumnAggregate::Min,
+                Some("max") => chartpds_core::queries::ColumnAggregate::Max,
+                Some("count") => chartpds_core::queries::ColumnAggregate::Count,
+                Some("median") => chartpds_core::queries::ColumnAggregate::Median,
+                Some(unknown) => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "invalid aggregate {unknown:?}; expected \"mean\", \"sum\", \"min\", \"max\", \"count\", \"median\", or \"duration_in_range\""
+                        ),
+                        None,
+                    ))
+                }
+            }
+        }
+    };
+    let field = match args.field.as_deref() {
+        None | Some("value") => chartpds_core::queries::StatsField::Value,
+        Some("start_time_of_day") => chartpds_core::queries::StatsField::StartTimeOfDay,
+        Some("end_time_of_day") => chartpds_core::queries::StatsField::EndTimeOfDay,
+        Some("interval_minutes") => chartpds_core::queries::StatsField::IntervalMinutes,
+        Some(other) => {
+            return Err(McpError::invalid_params(
+                format!(
+                    "invalid field {other:?}; expected \"value\", \"start_time_of_day\", \"end_time_of_day\", or \"interval_minutes\""
+                ),
+                None,
+            ))
+        }
+    };
+    Ok(chartpds_core::queries::ColumnSpec {
+        coding_system: &args.coding.system,
+        coding_code: &args.coding.code,
+        aggregate,
+        field,
+    })
+}
+
+/// Canonical string for a parsed aggregate, echoed back in responses.
+fn aggregate_name(aggregate: chartpds_core::queries::ColumnAggregate) -> &'static str {
+    match aggregate {
+        chartpds_core::queries::ColumnAggregate::Mean => "mean",
+        chartpds_core::queries::ColumnAggregate::Sum => "sum",
+        chartpds_core::queries::ColumnAggregate::Min => "min",
+        chartpds_core::queries::ColumnAggregate::Max => "max",
+        chartpds_core::queries::ColumnAggregate::Count => "count",
+        chartpds_core::queries::ColumnAggregate::Median => "median",
+        chartpds_core::queries::ColumnAggregate::DurationInRange { .. } => "duration_in_range",
+    }
+}
+
+/// Canonical string for a parsed field, echoed back in responses.
+fn field_name(field: chartpds_core::queries::StatsField) -> &'static str {
+    match field {
+        chartpds_core::queries::StatsField::Value => "value",
+        chartpds_core::queries::StatsField::StartTimeOfDay => "start_time_of_day",
+        chartpds_core::queries::StatsField::EndTimeOfDay => "end_time_of_day",
+        chartpds_core::queries::StatsField::IntervalMinutes => "interval_minutes",
+    }
+}
+
+/// Map an [`AlignedTableError`] to the MCP error space.
+///
+/// [`AlignedTableError`]: chartpds_core::queries::AlignedTableError
+fn map_table_err(err: &chartpds_core::queries::AlignedTableError) -> McpError {
+    match err {
+        chartpds_core::queries::AlignedTableError::InvalidTimezone(_)
+        | chartpds_core::queries::AlignedTableError::MissingEpisodeSpec => {
+            McpError::invalid_params(err.to_string(), None)
+        }
+        chartpds_core::queries::AlignedTableError::Db(_)
+        | chartpds_core::queries::AlignedTableError::Internal(_) => {
+            McpError::internal_error(format!("query failed: {err}"), None)
+        }
+    }
 }
 
 /// `ChartPDS` MCP server.
@@ -567,13 +761,23 @@ impl ChartPdsServer {
             None | Some("none") => chartpds_core::queries::Bucket::None,
             Some("day") => chartpds_core::queries::Bucket::Day,
             Some("hour") => chartpds_core::queries::Bucket::Hour,
+            Some("episode") => chartpds_core::queries::Bucket::Episode,
             Some(other) => {
                 return Err(McpError::invalid_params(
-                    format!("invalid bucket {other:?}; expected \"none\", \"day\", or \"hour\""),
+                    format!(
+                        "invalid bucket {other:?}; expected \"none\", \"day\", \"hour\", or \"episode\""
+                    ),
                     None,
                 ))
             }
         };
+        let gap_seconds = args.gap_seconds.unwrap_or(0);
+        if gap_seconds < 0 {
+            return Err(McpError::invalid_params(
+                "gap_seconds must be >= 0".to_string(),
+                None,
+            ));
+        }
 
         let result = chartpds_core::queries::duration_in_value_range(
             &self.pool,
@@ -587,6 +791,7 @@ impl ChartPdsServer {
                 value_max: args.value_max,
                 bucket,
                 timezone: args.timezone.as_deref(),
+                gap_seconds,
             },
         )
         .await
@@ -616,15 +821,16 @@ impl ChartPdsServer {
             .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
         let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
             .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
-        match args.bucket.as_deref() {
-            None | Some("day") => {}
+        let bucket = match args.bucket.as_deref() {
+            None | Some("day") => chartpds_core::queries::LongestBucket::Day,
+            Some("episode") => chartpds_core::queries::LongestBucket::Episode,
             Some(other) => {
                 return Err(McpError::invalid_params(
-                    format!("invalid bucket {other:?}; only \"day\" is supported"),
+                    format!("invalid bucket {other:?}; expected \"day\" or \"episode\""),
                     None,
                 ))
             }
-        }
+        };
         let gap_seconds = args.gap_seconds.unwrap_or(0);
 
         let result = chartpds_core::queries::longest_continuous_in_value_range(
@@ -638,6 +844,7 @@ impl ChartPdsServer {
                 value_min: args.value_min,
                 value_max: args.value_max,
                 gap_seconds,
+                bucket,
             },
         )
         .await
@@ -679,15 +886,23 @@ impl ChartPdsServer {
             Some("week") => chartpds_core::queries::StatsBucket::Week,
             Some("month") => chartpds_core::queries::StatsBucket::Month,
             Some("day_of_week") => chartpds_core::queries::StatsBucket::DayOfWeek,
+            Some("episode") => chartpds_core::queries::StatsBucket::Episode,
             Some(other) => {
                 return Err(McpError::invalid_params(
                     format!(
-                        "invalid bucket {other:?}; expected \"none\", \"day\", \"week\", \"month\", or \"day_of_week\""
+                        "invalid bucket {other:?}; expected \"none\", \"day\", \"week\", \"month\", \"day_of_week\", or \"episode\""
                     ),
                     None,
                 ))
             }
         };
+        let gap_seconds = args.gap_seconds.unwrap_or(0);
+        if gap_seconds < 0 {
+            return Err(McpError::invalid_params(
+                "gap_seconds must be >= 0".to_string(),
+                None,
+            ));
+        }
 
         let result = chartpds_core::queries::observation_stats(
             &self.pool,
@@ -701,6 +916,7 @@ impl ChartPdsServer {
                 bucket,
                 timezone: args.timezone.as_deref(),
                 thresholds: args.thresholds.as_deref(),
+                gap_seconds,
             },
         )
         .await
@@ -713,6 +929,147 @@ impl ChartPdsServer {
                 McpError::internal_error(format!("query failed: {err}"), None)
             }
         })?;
+
+        let json = serde_json::to_string(&result)
+            .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Aligned multi-coding table: one row per bucket with one value per requested coding — the store does the joining, no client-side re-keying. Args: columns [{coding {system, code}, aggregate (\"mean\" default | \"sum\" | \"min\" | \"max\" | \"count\" | \"median\" | \"duration_in_range\"), field (\"value\" default | \"start_time_of_day\" | \"end_time_of_day\" | \"interval_minutes\"), value_min/value_max (inclusive; required for duration_in_range, which reports minutes inside the range)}], start/end (RFC 3339, half-open), bucket (\"day\" default | \"week\" ISO keyed by Monday | \"month\" | \"episode\"), timezone (IANA, default UTC), episode {coding, gap_seconds?} (required for bucket \"episode\"; episodes are gap-tolerant chains of that coding's intervals, e.g. sleep periods, keyed by their RFC 3339 UTC start instant — a period crossing midnight stays in one row). Returns {columns:[{system, code, aggregate, field}], rows:[{bucket_key, values:[number|null per column, request order], confidence}]}; null means the coding has no qualifying data in that bucket. Example: one row per day with total sleep (93832-4, mean), WASO (103215-0, mean), and minutes of elevated heart rate (8867-4, duration_in_range value_min 100)."
+    )]
+    async fn observation_table(
+        &self,
+        Parameters(args): Parameters<ObservationTableArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if args.columns.is_empty() {
+            return Err(McpError::invalid_params(
+                "columns must not be empty".to_string(),
+                None,
+            ));
+        }
+        let start = time::OffsetDateTime::parse(&args.start, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
+        let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
+        let bucket = match args.bucket.as_deref() {
+            None | Some("day") => chartpds_core::queries::TableBucket::Day,
+            Some("week") => chartpds_core::queries::TableBucket::Week,
+            Some("month") => chartpds_core::queries::TableBucket::Month,
+            Some("episode") => chartpds_core::queries::TableBucket::Episode,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "invalid bucket {other:?}; expected \"day\", \"week\", \"month\", or \"episode\""
+                    ),
+                    None,
+                ))
+            }
+        };
+        if args.episode.is_some() && bucket != chartpds_core::queries::TableBucket::Episode {
+            return Err(McpError::invalid_params(
+                "episode is only valid with bucket \"episode\"".to_string(),
+                None,
+            ));
+        }
+        let episode = match &args.episode {
+            Some(spec) => {
+                let gap_seconds = spec.gap_seconds.unwrap_or(0);
+                if gap_seconds < 0 {
+                    return Err(McpError::invalid_params(
+                        "episode.gap_seconds must be >= 0".to_string(),
+                        None,
+                    ));
+                }
+                Some(chartpds_core::queries::EpisodeSpec {
+                    coding_system: &spec.coding.system,
+                    coding_code: &spec.coding.code,
+                    gap_seconds,
+                })
+            }
+            None => None,
+        };
+        let columns = args
+            .columns
+            .iter()
+            .map(parse_column)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let table = chartpds_core::queries::aligned_table(
+            &self.pool,
+            time::OffsetDateTime::now_utc(),
+            chartpds_core::queries::AlignedTableParams {
+                columns: &columns,
+                start,
+                end,
+                bucket,
+                episode,
+                timezone: args.timezone.as_deref(),
+            },
+        )
+        .await
+        .map_err(|err| map_table_err(&err))?;
+
+        let column_echo: Vec<serde_json::Value> = columns
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "system": c.coding_system,
+                    "code": c.coding_code,
+                    "aggregate": aggregate_name(c.aggregate),
+                    "field": field_name(c.field),
+                })
+            })
+            .collect();
+        let json = serde_json::to_string(&serde_json::json!({
+            "columns": column_echo,
+            "rows": table.rows,
+        }))
+        .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "How two coded signals relate over a window, without exporting data. Both signals are reduced to one value per bucket (same column spec as observation_table: coding {system, code}, aggregate \"mean\" default | \"sum\" | \"min\" | \"max\" | \"count\" | \"median\" | \"duration_in_range\" with value_min/value_max, field), then paired bucket-by-bucket. Args: x, y (column specs), start/end (RFC 3339, half-open), bucket (\"day\" default | \"week\" | \"month\"), timezone (IANA), lag (buckets; 1 pairs each x with the FOLLOWING bucket's y — e.g. activity during the day vs. sleep the following night; default 0; may be negative), threshold (on x: also returns y statistics for pairs with x strictly below vs. at-or-above). Buckets missing either signal are excluded; n_pairs is the kept-pair count. Returns {n_pairs, pearson_r (null under 2 pairs or zero variance), spearman_r (rank-based; robust to outliers and monotonic-but-nonlinear relationships — a gap between it and pearson_r suggests outliers or a curved relationship), x_mean, x_sd, y_mean, y_sd, groups?: {x_below, x_at_or_above: {count, mean, sd, min, max, p50}}}."
+    )]
+    async fn observation_relationship(
+        &self,
+        Parameters(args): Parameters<ObservationRelationshipArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let start = time::OffsetDateTime::parse(&args.start, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid start: {err}"), None))?;
+        let end = time::OffsetDateTime::parse(&args.end, &Rfc3339)
+            .map_err(|err| McpError::invalid_params(format!("invalid end: {err}"), None))?;
+        let bucket = match args.bucket.as_deref() {
+            None | Some("day") => chartpds_core::queries::RelationshipBucket::Day,
+            Some("week") => chartpds_core::queries::RelationshipBucket::Week,
+            Some("month") => chartpds_core::queries::RelationshipBucket::Month,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!("invalid bucket {other:?}; expected \"day\", \"week\", or \"month\""),
+                    None,
+                ))
+            }
+        };
+        let x = parse_column(&args.x)?;
+        let y = parse_column(&args.y)?;
+
+        let result = chartpds_core::queries::signal_relationship(
+            &self.pool,
+            time::OffsetDateTime::now_utc(),
+            chartpds_core::queries::SignalRelationshipParams {
+                x,
+                y,
+                start,
+                end,
+                bucket,
+                timezone: args.timezone.as_deref(),
+                lag_buckets: args.lag.unwrap_or(0),
+                x_threshold: args.threshold,
+            },
+        )
+        .await
+        .map_err(|err| map_table_err(&err))?;
 
         let json = serde_json::to_string(&result)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
@@ -1356,6 +1713,7 @@ mod tests {
                 value_max: 118.0,
                 bucket: None,
                 timezone: None,
+                gap_seconds: None,
             }))
             .await
             .expect("tool call succeeds");
@@ -1383,6 +1741,7 @@ mod tests {
                 value_max: 4.0, // asleep epochs
                 bucket: Some("hour".to_string()),
                 timezone: Some("America/New_York".to_string()),
+                gap_seconds: None,
             }))
             .await
             .expect("tool call succeeds");
@@ -1398,6 +1757,39 @@ mod tests {
             "2026-01-01T17:00:00-05:00"
         );
         assert_eq!(value["per_bucket"][0]["total_minutes"], 10.0);
+    }
+
+    #[tokio::test]
+    async fn observation_duration_in_range_episode_bucket_keys_by_start_instant() {
+        let server = fresh_server_with_sleep_epochs().await;
+        let result = server
+            .observation_duration_in_range(Parameters(ObservationDurationInRangeArgs {
+                coding: Coding {
+                    system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage".to_string(),
+                    code: "aasm-sleep-stage".to_string(),
+                },
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-02T00:00:00Z".to_string(),
+                value_min: 3.0,
+                value_max: 3.0, // deep (N3) only
+                bucket: Some("episode".to_string()),
+                timezone: None,
+                gap_seconds: None,
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        let arr = value["per_bucket"].as_array().expect("array");
+        // Both epochs chain into one episode keyed by its start instant;
+        // only the 5-minute N3 epoch is in range.
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["bucket_start"], "2026-01-01T22:00:00Z");
+        assert_eq!(arr[0]["total_minutes"], 5.0);
     }
 
     async fn fresh_server_with_sleep_epochs() -> ChartPdsServer {
@@ -1495,6 +1887,36 @@ mod tests {
         assert_eq!(arr[0]["longest_minutes"], 10.0);
     }
 
+    #[tokio::test]
+    async fn observation_longest_period_in_range_episode_bucket() {
+        let server = fresh_server_with_sleep_epochs().await;
+        let result = server
+            .observation_longest_period_in_range(Parameters(ObservationLongestPeriodInRangeArgs {
+                coding: Coding {
+                    system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage".to_string(),
+                    code: "aasm-sleep-stage".to_string(),
+                },
+                start: "2026-01-01T00:00:00Z".to_string(),
+                end: "2026-01-02T00:00:00Z".to_string(),
+                value_min: 1.0,
+                value_max: 4.0,
+                bucket: Some("episode".to_string()),
+                gap_seconds: Some(0),
+            }))
+            .await
+            .expect("tool call succeeds");
+
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        let arr = value["per_bucket"].as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["bucket_start"], "2026-01-01T22:00:00Z");
+        assert_eq!(arr[0]["longest_minutes"], 10.0);
+    }
+
     /// Three nightly total-sleep observations: 400, 420, 380 minutes.
     async fn fresh_server_with_nightly_sleep() -> ChartPdsServer {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1560,6 +1982,7 @@ mod tests {
             bucket: None,
             timezone: None,
             thresholds: None,
+            gap_seconds: None,
         }
     }
 
@@ -1625,6 +2048,266 @@ mod tests {
             .map(|b| b["bucket_key"].as_str().expect("key"))
             .collect();
         assert_eq!(keys, vec!["thu", "fri", "sat"]);
+    }
+
+    /// Body weight on Jan 1/2/3 and heart rate on Jan 1/2 only.
+    async fn fresh_server_with_weight_and_hr() -> ChartPdsServer {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+
+        let key = BlobKey::from_hex_str(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .expect("valid key");
+        let doc_id = insert_source_document(
+            &pool,
+            InsertSourceDocumentParams {
+                archive_key: &key,
+                kind: "ccda",
+                source: "test",
+                original_filename: None,
+                archived_at: OffsetDateTime::now_utc(),
+                document_date: None,
+            },
+        )
+        .await
+        .expect("doc");
+        for (code, start, value) in [
+            ("29463-7", datetime!(2026-01-01 08:00:00 UTC), 380.0),
+            ("29463-7", datetime!(2026-01-02 08:00:00 UTC), 400.0),
+            ("29463-7", datetime!(2026-01-03 08:00:00 UTC), 420.0),
+            ("8867-4", datetime!(2026-01-01 08:00:00 UTC), 60.0),
+            ("8867-4", datetime!(2026-01-02 08:00:00 UTC), 80.0),
+        ] {
+            insert_observation(
+                &pool,
+                InsertObservationParams {
+                    source_document_id: doc_id,
+                    coding_system: "http://loinc.org",
+                    coding_code: code,
+                    coding_display: None,
+                    effective_start: start,
+                    effective_end: None,
+                    value_quantity: Some(value),
+                    value_string: None,
+                    value_unit: None,
+                },
+            )
+            .await
+            .expect("obs");
+        }
+
+        let archive = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        let derived = Archive::new(Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>);
+        ChartPdsServer::new(pool, archive, derived, None, reqwest::Client::new())
+    }
+
+    fn table_column(code: &str) -> TableColumnArgs {
+        TableColumnArgs {
+            coding: Coding {
+                system: "http://loinc.org".to_string(),
+                code: code.to_string(),
+            },
+            aggregate: None,
+            field: None,
+            value_min: None,
+            value_max: None,
+        }
+    }
+
+    fn table_args(columns: Vec<TableColumnArgs>) -> ObservationTableArgs {
+        ObservationTableArgs {
+            columns,
+            start: "2026-01-01T00:00:00Z".to_string(),
+            end: "2026-02-01T00:00:00Z".to_string(),
+            bucket: None,
+            timezone: None,
+            episode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_table_aligns_day_rows_with_explicit_null() {
+        let server = fresh_server_with_weight_and_hr().await;
+        let result = server
+            .observation_table(Parameters(table_args(vec![
+                table_column("29463-7"),
+                table_column("8867-4"),
+            ])))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(value["columns"][0]["code"], "29463-7");
+        assert_eq!(value["columns"][0]["aggregate"], "mean");
+        assert_eq!(value["columns"][0]["field"], "value");
+        let rows = value["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["bucket_key"], "2026-01-01");
+        assert_eq!(rows[0]["values"], serde_json::json!([380.0, 60.0]));
+        // Jan 3 has weight but no heart rate: explicit null in position 2.
+        assert_eq!(rows[2]["bucket_key"], "2026-01-03");
+        assert_eq!(rows[2]["values"], serde_json::json!([420.0, null]));
+        assert_eq!(rows[2]["confidence"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn observation_table_episode_bucket_end_to_end() {
+        let server = fresh_server_with_sleep_epochs().await;
+        let mut deep = table_column("aasm-sleep-stage");
+        deep.coding.system = "https://chartpds.fhwang.net/coding/aasm/sleep-stage".to_string();
+        deep.aggregate = Some("duration_in_range".to_string());
+        deep.value_min = Some(3.0);
+        deep.value_max = Some(3.0);
+        let mut args = table_args(vec![deep]);
+        args.bucket = Some("episode".to_string());
+        args.episode = Some(TableEpisodeArgs {
+            coding: Coding {
+                system: "https://chartpds.fhwang.net/coding/aasm/sleep-stage".to_string(),
+                code: "aasm-sleep-stage".to_string(),
+            },
+            gap_seconds: None,
+        });
+        let result = server
+            .observation_table(Parameters(args))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        let rows = value["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["bucket_key"], "2026-01-01T22:00:00Z");
+        assert_eq!(rows[0]["values"], serde_json::json!([5.0]));
+    }
+
+    #[tokio::test]
+    async fn observation_table_rejects_invalid_args() {
+        let server = fresh_server_with_weight_and_hr().await;
+
+        // duration_in_range without value bounds.
+        let mut bad = table_column("8867-4");
+        bad.aggregate = Some("duration_in_range".to_string());
+        let err = server
+            .observation_table(Parameters(table_args(vec![bad])))
+            .await
+            .expect_err("missing bounds");
+        assert!(err.to_string().contains("value_min"));
+
+        // Value bounds with a non-duration aggregate.
+        let mut bad = table_column("8867-4");
+        bad.value_min = Some(1.0);
+        let err = server
+            .observation_table(Parameters(table_args(vec![bad])))
+            .await
+            .expect_err("bounds with mean");
+        assert!(err.to_string().contains("duration_in_range"));
+
+        // Episode bucket without an episode spec.
+        let mut args = table_args(vec![table_column("8867-4")]);
+        args.bucket = Some("episode".to_string());
+        let err = server
+            .observation_table(Parameters(args))
+            .await
+            .expect_err("missing episode spec");
+        assert!(err.to_string().contains("episode"));
+
+        // Empty columns.
+        let err = server
+            .observation_table(Parameters(table_args(vec![])))
+            .await
+            .expect_err("empty columns");
+        assert!(err.to_string().contains("columns"));
+
+        // Unknown aggregate.
+        let mut bad = table_column("8867-4");
+        bad.aggregate = Some("mode".to_string());
+        let err = server
+            .observation_table(Parameters(table_args(vec![bad])))
+            .await
+            .expect_err("unknown aggregate");
+        assert!(err.to_string().contains("invalid aggregate"));
+    }
+
+    fn relationship_args() -> ObservationRelationshipArgs {
+        ObservationRelationshipArgs {
+            x: table_column("29463-7"),
+            y: table_column("8867-4"),
+            start: "2026-01-01T00:00:00Z".to_string(),
+            end: "2026-02-01T00:00:00Z".to_string(),
+            bucket: None,
+            timezone: None,
+            lag: None,
+            threshold: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_relationship_reports_exact_pearson_r() {
+        let server = fresh_server_with_weight_and_hr().await;
+        let result = server
+            .observation_relationship(Parameters(relationship_args()))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        // Jan 3 has weight but no HR → excluded. Remaining pairs
+        // (380, 60), (400, 80) are perfectly correlated.
+        assert_eq!(value["n_pairs"], 2);
+        assert_eq!(value["pearson_r"], 1.0);
+        // Two pairs, ranks agree → ρ = 1 as well.
+        assert_eq!(value["spearman_r"], 1.0);
+        assert_eq!(value["x_mean"], 390.0);
+        assert_eq!(value["y_mean"], 70.0);
+        assert!(value.get("groups").is_none(), "no threshold requested");
+    }
+
+    #[tokio::test]
+    async fn observation_relationship_lag_shifts_y_forward() {
+        let server = fresh_server_with_weight_and_hr().await;
+        let mut args = relationship_args();
+        args.lag = Some(1);
+        args.threshold = Some(400.0);
+        let result = server
+            .observation_relationship(Parameters(args))
+            .await
+            .expect("tool call succeeds");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        // Only (x Jan 1 = 380, y Jan 2 = 80) pairs; a single pair has no
+        // correlation.
+        assert_eq!(value["n_pairs"], 1);
+        assert_eq!(value["pearson_r"], serde_json::Value::Null);
+        assert_eq!(value["spearman_r"], serde_json::Value::Null);
+        assert_eq!(value["groups"]["x_below"]["count"], 1);
+        assert_eq!(value["groups"]["x_below"]["mean"], 80.0);
+        assert_eq!(value["groups"]["x_at_or_above"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn observation_relationship_rejects_episode_bucket() {
+        let server = fresh_server_with_weight_and_hr().await;
+        let mut args = relationship_args();
+        args.bucket = Some("episode".to_string());
+        let err = server
+            .observation_relationship(Parameters(args))
+            .await
+            .expect_err("episode bucket unsupported");
+        assert!(err.to_string().contains("invalid bucket"));
     }
 
     #[tokio::test]

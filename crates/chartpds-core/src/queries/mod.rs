@@ -5,11 +5,13 @@
 //! here; this module is read-shaped (free functions, no state) and
 //! deliberately small.
 
+mod aligned_table;
 mod counts_per_code;
 mod current_medications;
 mod current_problems;
 mod day_confidence;
 mod duration_in_value_range;
+mod episodes;
 mod get_narrative;
 mod latest_by_code;
 mod list_notifications;
@@ -17,9 +19,14 @@ mod longest_continuous_in_value_range;
 mod observation_history;
 mod observation_stats;
 mod search_narratives;
+mod signal_relationship;
 #[cfg(test)]
 mod test_support;
 
+pub use aligned_table::{
+    aligned_table, AlignedTable, AlignedTableError, AlignedTableParams, ColumnAggregate,
+    ColumnSpec, EpisodeSpec, TableBucket, TableRow,
+};
 pub use counts_per_code::{counts_per_code, MetricSummary};
 pub use current_medications::{current_medications, CurrentMedication, CurrentMedications};
 pub use current_problems::{current_problems, CurrentProblem, CurrentProblems};
@@ -35,7 +42,7 @@ pub use get_narrative::{get_narrative, NarrativeCoding, NarrativeDetail};
 pub use latest_by_code::latest_by_code;
 pub use list_notifications::list_recent_notifications;
 pub use longest_continuous_in_value_range::{
-    longest_continuous_in_value_range, BucketLongest, LongestContinuousInRange,
+    longest_continuous_in_value_range, BucketLongest, LongestBucket, LongestContinuousInRange,
     LongestContinuousParams,
 };
 pub use observation_history::{observation_history, CodingKey};
@@ -44,3 +51,7 @@ pub use observation_stats::{
     ObservationStatsParams, StatsBucket, StatsField, StatsSummary, ThresholdCount,
 };
 pub use search_narratives::{search_narratives, NarrativeSearchHit};
+pub use signal_relationship::{
+    signal_relationship, GroupSummary, RelationshipBucket, RelationshipGroups, SignalRelationship,
+    SignalRelationshipParams,
+};
