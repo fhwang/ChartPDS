@@ -1,7 +1,7 @@
 # MCP tool surface consolidation (issue #29)
 
 **Date:** 2026-07-17
-**Status:** Approved
+**Status:** Implemented
 **Issue:** [#29 — Reassess tool surface for consistency, general API best practices](https://github.com/fhwang/ChartPDS/issues/29)
 
 ## Context

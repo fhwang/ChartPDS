@@ -215,7 +215,7 @@ ingest fails before anything is archived or indexed. A missing
 naming the fix). A transient LLM failure is retried in-band by
 `ClaudeExtractor` (3 attempts total; connection errors and HTTP 429/5xx,
 with short linear backoff — see `MAX_ATTEMPTS` in `extraction/llm.rs`);
-a sustained outage then errors the `ingest_record` call. In every failure
+a sustained outage then errors the `record_ingest` call. In every failure
 case nothing is persisted, so there is no partial text-only state to
 reconcile and nothing for `rebuild_index` to resurrect — the caller fixes
 the configuration or waits out the outage, then re-runs the same ingest.
@@ -226,9 +226,8 @@ and the reasons in `rejected`.)
 ## Queries
 
 `queries::` holds generic analytical primitives over the index.
-Currently: `latest_by_code`, `observation_history`, `counts_per_code`,
-`current_problems`, `current_medications`, `duration_in_value_range`,
-`longest_continuous_in_value_range`, `search_narratives`, `get_narrative`,
+Currently: `latest_by_coding`, `observation_history`, `counts_per_code`,
+`current_problems`, `current_medications`, `search_narratives`, `get_narrative`,
 `observation_stats`, `aligned_table`, `signal_relationship`. Each is a pure async function
 `(&SqlitePool, args) -> Result<T, sqlx::Error>`;
 there is no shared state and no struct-style query builder.
@@ -236,32 +235,38 @@ The `current_problems` and `current_medications` primitives return deduped
 lists with per-code provenance, replacing the earlier `list_problems` and
 `list_medications` functions.
 `observation_history` accepts multiple `{system, code}` codings with optional
-open-ended bounds, replacing the earlier `in_range` function.
+open-ended `start`/`end` bounds, replacing the earlier `in_range` function.
 `counts_per_code` returns per-`(system, code)` summaries including
 `count`, `first_effective_start`, and `last_effective_start`.
-Both `duration_in_value_range` and `longest_continuous_in_value_range`
-select observations by `{coding_system, coding_code}`; day bucketing uses
-the UTC calendar day of the interval or run start. They attribute that day
-differently, and the difference is intentional: `duration_in_value_range`
-buckets each interval independently (a run crossing UTC midnight has its
-minutes split across both days), while `longest_continuous_in_value_range`
-attributes a whole run to the UTC day its first interval started (a
-midnight-crossing block lands wholly in one day). So per-day totals from the
-two tools need not reconcile for a block that straddles midnight.
 
-`duration_in_value_range`, `longest_continuous_in_value_range`, and
-`observation_stats` also accept an `episode` bucket: episodes are
-gap-tolerant chains of the coding's interval observations (detection lives
-in `queries/episodes.rs`), keyed by the episode's RFC 3339 UTC start
-instant, so a sleep period crossing midnight lands in exactly one bucket.
-`aligned_table` returns one row per bucket (day / ISO week / month /
-episode) with one value per requested coding — each column reduces via
-mean / sum / min / max / count / median or in-range interval minutes, and
-absent cells are explicit nulls. `signal_relationship` pairs two codings'
-per-bucket values with an optional lag (in buckets) and reports `n_pairs`,
-Pearson r, Spearman ρ (rank-based; robust to outliers and
-monotonic-but-nonlinear relationships), per-signal mean/sd, and optional
-per-group `y` statistics split by an `x` threshold.
+The earlier standalone `duration_in_value_range` and
+`longest_continuous_in_value_range` primitives are gone; their capability now
+lives as two column aggregates on `aligned_table` and `signal_relationship`:
+`duration_in_range` and `longest_run_in_range` (the latter takes a per-column
+`gap_seconds` run tolerance; both take an inclusive `value_min`/`value_max`).
+Their bucket attribution differs, and the difference is intentional:
+`duration_in_range` credits each interval whole to the bucket containing its
+start (a run crossing a bucket boundary has its minutes split across both
+buckets), while `longest_run_in_range` chains runs window-wide and
+attributes each whole run to the bucket containing the run's start (a
+boundary-crossing run lands wholly in one bucket). So per-bucket totals from
+the two aggregates need not reconcile for a run that straddles a boundary.
+
+`aligned_table`, `signal_relationship`, and `observation_stats` all accept
+an explicit `episode: {coding, gap_seconds?}` spec, required exactly when
+bucketing by `episode` (and rejected otherwise): episodes are gap-tolerant
+chains of that coding's interval observations (detection lives in
+`queries/episodes.rs`), keyed by the episode's RFC 3339 UTC start instant,
+so a sleep period crossing midnight lands in exactly one bucket.
+`aligned_table` returns one row per bucket (none / hour / day / ISO week /
+month / day-of-week / episode) with one value per requested coding — each
+column reduces via mean / sum / min / max / count / median or one of the two
+range aggregates, and absent cells are explicit nulls. `signal_relationship`
+pairs two codings' per-bucket values (hour / day / week / month / episode)
+with an optional lag (in buckets) and reports `n_pairs`, Pearson r, Spearman
+ρ (rank-based; robust to outliers and monotonic-but-nonlinear
+relationships), per-signal mean/sd, and optional per-group `y` statistics
+split by an `x` threshold.
 
 These are composed into named MCP tools (and later CLI subcommands)
 by the binary crate. Adding a new query: drop a new file under
@@ -275,55 +280,60 @@ cache the new SQL.
 `CHARTPDS_DATA_DIR` from the environment (a plain absolute directory path,
 e.g. `/path/to/chartpds-data`), opens the SQLite pool at `$DIR/chartpds.db`,
 the local-FS archive at `$DIR/archive/`, and the derived store at
-`$DIR/derived/`, and serves 18 tools:
+`$DIR/derived/`, and serves 16 tools:
 
-- `ingest_record` — ingest a document (write path); `kind="ccda"` for CCDA
+- `record_ingest` — ingest a document (write path); `kind="ccda"` for CCDA
   XML, `kind="clinical-pdf"` for a narrative clinical PDF (see Narrative
   documents below) — indexes its text and extracts verified codings; requires
   `ANTHROPIC_API_KEY` (a keyless or failed extraction fails the ingest)
-- `latest_observation_by_code` — most-recent observation by LOINC code
-- `get_observation_history` — observations across one or more `{system, code}` codings,
-  with optional open-ended `since`/`until` bounds (replaces `observations_in_range`)
-- `observation_counts` — discover codings present in the store: returns
-  `{coding_system, coding_code, count, first_effective_start, last_effective_start}`
-  per `(system, code)`
-- `describe_codings` — value-encoding semantics for the codings ChartPDS mints
-  (non-standard only; LOINC omitted as self-describing)
-- `observation_duration_in_range` — total minutes a coded signal spent in a
-  value range; buckets: `none` / `day` / `hour` / `episode`
-- `observation_longest_period_in_range` — longest continuous in-range run
-  per day or per episode
+- `observation_latest` — most-recent observation for a given coding (LOINC
+  or a minted coding, e.g. AASM sleep stages); null if none matches
+- `observation_history` — observations across one or more `{system, code}`
+  codings, with optional half-open `start`/`end` bounds (either or both may
+  be omitted for open-ended history); returns `{items}`
+- `observation_codings` — discover codings present in the store: returns
+  `{items: [{coding_system, coding_code, count, first_effective_start,
+  last_effective_start}]}` per `(system, code)`
+- `coding_definitions` — value-encoding semantics for the codings ChartPDS
+  mints (non-standard only; LOINC omitted as self-describing); `{items}`
 - `observation_stats` — descriptive statistics (count, mean, sample sd,
   min/max, p25/p50/p75, optional threshold counts) for one coding over a
   window; `field` selects `value`, `start_time_of_day` / `end_time_of_day`
   (minutes since local noon), or `interval_minutes`; optional bucketing by
-  `day` / `week` (ISO Monday) / `month` / `day_of_week` / `episode` in a
-  request timezone
+  `none` / `hour` / `day` / `week` (ISO Monday) / `month` / `day_of_week` /
+  `episode` (the last requires an explicit `episode: {coding, gap_seconds}`
+  spec) in a request timezone
 - `observation_table` — aligned multi-coding table: one row per bucket
-  (`day` / `week` / `month` / `episode`) with one aggregated value (or
-  explicit null) per requested coding, in a single call
+  (`none` / `hour` / `day` / `week` / `month` / `day_of_week` / `episode`)
+  with one aggregated value (or explicit null) per requested coding, in a
+  single call; each column aggregates via `mean` / `sum` / `min` / `max` /
+  `count` / `median` or the range aggregates `duration_in_range` /
+  `longest_run_in_range` (value bounds + optional `gap_seconds`); returns
+  `{columns, rows}` with `bucket_key` null only for bucket `none`
 - `observation_relationship` — how two codings relate over a window:
-  per-bucket pairing with optional lag (in buckets), Pearson r, Spearman ρ,
-  `n_pairs`, and optional threshold-group comparison
-- `list_problems` — current problems (diagnoses), deduped to one entry per
+  per-bucket (`hour` / `day` / `week` / `month` / `episode`) pairing with
+  optional lag (in buckets), Pearson r, Spearman ρ, `n_pairs`, and optional
+  threshold-group comparison
+- `problem_list` — current problems (diagnoses), deduped to one entry per
   code with provenance (`document_count`, `first_seen`, `last_seen`) and the
   archive's `latest_document_date`; `status` is the raw source value and is
-  unreliable for active/resolved
-- `list_medications` — current medications, deduped per code with the same
-  provenance shape
-- `connect_source` — connect a data source (fitbit OAuth or oura PAT)
-- `sync_source` — sync one or all sources; returns `{results:[{source, ok,
+  unreliable for active/resolved; `{latest_document_date, items}`
+- `medication_list` — current medications, deduped per code with the same
+  provenance shape; `{latest_document_date, items}`
+- `narrative_search` — full-text search (FTS5, BM25-ranked) over narrative
+  clinical documents; omit `query` to list the whole narrative catalog
+  newest-first; `{items}`
+- `narrative_get` — fetch one narrative document by `source_document_id`:
+  metadata, full extracted text, and its verified codings (with
+  `section_label`); null if not found
+- `source_connect` — connect a data source (fitbit OAuth or oura PAT)
+- `source_sync` — sync one or all sources; returns `{items:[{source, ok,
   days_synced?, total_samples?, reason?, message?}]}` with failures reported
   in-band (reason ∈ reauth_required, no_credentials, transient, parse_error,
   archive_error, database_error)
-- `rebuild_index` — drop and rebuild the index from archived blobs
-- `list_notifications` — list recent notification log entries (newest first)
-- `search_narratives` — full-text search (FTS5, BM25-ranked) over narrative
-  clinical documents; omit `query` to list the whole narrative catalog
-  newest-first
-- `get_narrative` — fetch one narrative document by `source_document_id`:
-  metadata, full extracted text, and its verified codings (with
-  `section_label`)
+- `notification_list` — list recent notification log entries (newest
+  first); `{items}`
+- `index_rebuild` — drop and rebuild the index from archived blobs
 
 Adding a new tool: define an `async fn` on the `ChartPdsServer` impl
 inside the `#[tool_router]` block in `crates/chartpds-mcp/src/server.rs`.
@@ -340,10 +350,10 @@ Heart-rate data from Fitbit flows through Google's Health API. Setup:
 1. Create a Google Cloud project with the Health API enabled.
 2. Create an OAuth 2.0 "Desktop app" client. Set `GOOGLE_HEALTH_CLIENT_ID`
    and `GOOGLE_HEALTH_CLIENT_SECRET` in your environment.
-3. Call `connect_source` with `source="fitbit"`. Open the URL in a browser
+3. Call `source_connect` with `source="fitbit"`. Open the URL in a browser
    and authorize. The server automatically catches the callback and stores
    credentials.
-4. Call `sync_source` with `source="fitbit"` (optionally with `window_days`)
+4. Call `source_sync` with `source="fitbit"` (optionally with `window_days`)
    to pull recent data.
 
 The adapter code lives in `crates/chartpds-core/src/sources/fitbit/`.
@@ -355,8 +365,8 @@ Sleep-stage data from the Oura ring via the Oura v2 API. Setup:
 1. Generate a personal access token (PAT) at
    <https://cloud.ouraring.com/personal-access-tokens>.
 2. Either set `OURA_PERSONAL_ACCESS_TOKEN` in your environment or call
-   `connect_source` with `source="oura"` and `token="<your PAT>"`.
-3. Call `sync_source` with `source="oura"` (optionally with `window_days`)
+   `source_connect` with `source="oura"` and `token="<your PAT>"`.
+3. Call `source_sync` with `source="oura"` (optionally with `window_days`)
    to pull recent sleep sessions.
 
 Oura's `sleep_phase_5_min` string encodes per-epoch (5-minute)
@@ -394,7 +404,7 @@ configurable interval (default 5 minutes). The daemon is a
 when the process exits.
 
 Set `CHARTPDS_SYNC_INTERVAL_SECS` to change the interval. Set to
-`0` to disable (only manual `sync_source` tool calls).
+`0` to disable (only manual `source_sync` tool calls).
 
 The daemon updates `source_state` after each tick with the sync
 result (success/failure, consecutive failures, timestamps). After
@@ -404,7 +414,7 @@ dispatches any that fire (see Notifications below).
 ## Rebuild index
 
 To regenerate the index after a parser fix or schema change, call
-`rebuild_index`. It clears `source_documents` (cascading to
+`index_rebuild`. It clears `source_documents` (cascading to
 observations, problems, medications, and narrative_texts) and replays
 every blob from both the archive and the derived store, routed by its
 sidecar manifest `type`: CCDA documents are re-ingested, Fitbit/Oura
@@ -412,7 +422,7 @@ blobs are replayed by their adapters
 (`sources::{fitbit,oura}::storage::replay`), and `clinical-pdf`
 blobs have their text re-derived deterministically (`extract_pdf_text`
 on the archived bytes — never an LLM call). All sources are
-reconstructed from the two stores alone — no `sync_source` re-pull is
+reconstructed from the two stores alone — no `source_sync` re-pull is
 needed. Each blob's `archived_at` is preserved from its manifest.
 
 Narrative extraction results are replayed, not regenerated: rebuild runs
@@ -432,7 +442,7 @@ blobs_skipped, narratives_ingested, extractions_applied}`.
 
 The notification system detects operational problems (auth failures,
 sustained sync errors) and logs them so the user can discover issues
-via the `list_notifications` MCP tool.
+via the `notification_list` MCP tool.
 
 Two conditions are evaluated after every sync tick:
 

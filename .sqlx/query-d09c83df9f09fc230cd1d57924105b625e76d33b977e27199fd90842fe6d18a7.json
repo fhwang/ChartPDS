@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT effective_start AS \"effective_start!: OffsetDateTime\",\n               effective_end AS \"effective_end!: OffsetDateTime\"\n        FROM observations\n        WHERE coding_system = ?\n          AND coding_code = ?\n          AND effective_start >= ?\n          AND effective_start < ?\n          AND effective_end IS NOT NULL\n        ORDER BY effective_start\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "effective_start!: OffsetDateTime",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_end!: OffsetDateTime",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "d09c83df9f09fc230cd1d57924105b625e76d33b977e27199fd90842fe6d18a7"
+}

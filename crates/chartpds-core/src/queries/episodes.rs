@@ -51,19 +51,12 @@ pub(crate) fn episode_index_for(episodes: &[Episode], ts: OffsetDateTime) -> Opt
     (ts <= episodes[candidate].end).then_some(candidate)
 }
 
-/// One interval observation row plus its document's confidence keys, as
-/// fetched by [`fetch_all_intervals`].
+/// One interval observation row, as fetched by [`fetch_all_intervals`].
 pub(crate) struct IntervalRow {
     /// `effective_start`.
     pub(crate) start: OffsetDateTime,
     /// `effective_end` (rows without one are not fetched).
     pub(crate) end: OffsetDateTime,
-    /// `value_quantity`, if any.
-    pub(crate) value: Option<f64>,
-    /// The owning document's `source`.
-    pub(crate) source: String,
-    /// The owning document's `document_date`.
-    pub(crate) document_date: Option<String>,
 }
 
 /// Fetch every interval observation (non-null `effective_end`) of one coding
@@ -79,19 +72,15 @@ pub(crate) async fn fetch_all_intervals(
 ) -> Result<Vec<IntervalRow>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
-        SELECT o.effective_start AS "effective_start!: OffsetDateTime",
-               o.effective_end AS "effective_end!: OffsetDateTime",
-               o.value_quantity AS "value_quantity?: f64",
-               sd.source AS "source!: String",
-               sd.document_date AS "document_date?: String"
-        FROM observations o
-        JOIN source_documents sd ON o.source_document_id = sd.id
-        WHERE o.coding_system = ?
-          AND o.coding_code = ?
-          AND o.effective_start >= ?
-          AND o.effective_start < ?
-          AND o.effective_end IS NOT NULL
-        ORDER BY o.effective_start
+        SELECT effective_start AS "effective_start!: OffsetDateTime",
+               effective_end AS "effective_end!: OffsetDateTime"
+        FROM observations
+        WHERE coding_system = ?
+          AND coding_code = ?
+          AND effective_start >= ?
+          AND effective_start < ?
+          AND effective_end IS NOT NULL
+        ORDER BY effective_start
         "#,
         coding_system,
         coding_code,
@@ -105,11 +94,52 @@ pub(crate) async fn fetch_all_intervals(
         .map(|r| IntervalRow {
             start: r.effective_start,
             end: r.effective_end,
-            value: r.value_quantity,
-            source: r.source,
-            document_date: r.document_date,
         })
         .collect())
+}
+
+/// One continuous run of in-range intervals.
+pub(crate) struct Run {
+    /// Start of the run's first interval.
+    pub(crate) start: OffsetDateTime,
+    /// Wall-clock length of the run (last end - first start), in minutes.
+    pub(crate) minutes: f64,
+}
+
+/// Group already-in-range, start-ordered intervals into continuous runs.
+///
+/// Two consecutive intervals join the same run when
+/// `next.start - prev.end <= gap_seconds`; a larger gap starts a new run.
+/// A run's length is the wall-clock span from its first start to its last end.
+pub(crate) fn runs(intervals: &[(OffsetDateTime, OffsetDateTime)], gap_seconds: i64) -> Vec<Run> {
+    let mut out = Vec::new();
+    let mut cur_start: Option<OffsetDateTime> = None;
+    let mut cur_end: Option<OffsetDateTime> = None;
+
+    for &(start, end) in intervals {
+        match cur_end {
+            Some(prev_end) if (start - prev_end).whole_seconds() <= gap_seconds => {
+                cur_end = Some(end);
+            }
+            _ => {
+                if let (Some(s), Some(e)) = (cur_start, cur_end) {
+                    out.push(Run {
+                        start: s,
+                        minutes: (e - s).as_seconds_f64() / 60.0,
+                    });
+                }
+                cur_start = Some(start);
+                cur_end = Some(end);
+            }
+        }
+    }
+    if let (Some(s), Some(e)) = (cur_start, cur_end) {
+        out.push(Run {
+            start: s,
+            minutes: (e - s).as_seconds_f64() / 60.0,
+        });
+    }
+    out
 }
 
 /// Infallible RFC 3339 UTC bucket key (`YYYY-MM-DDTHH:MM:SSZ`).
