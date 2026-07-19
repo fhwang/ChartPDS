@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id AS \"id!: i64\",\n               source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               effective_start AS \"effective_start: OffsetDateTime\",\n               effective_end AS \"effective_end?: OffsetDateTime\",\n               value_quantity, value_string, value_unit\n        FROM observations\n        WHERE coding_code = ?\n        ORDER BY effective_start DESC\n        LIMIT 1\n        ",
+  "query": "\n        SELECT id AS \"id!: i64\",\n               source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               effective_start AS \"effective_start: OffsetDateTime\",\n               effective_end AS \"effective_end?: OffsetDateTime\",\n               value_quantity, value_string, value_unit\n        FROM observations\n        WHERE coding_system = ? AND coding_code = ?\n        ORDER BY effective_start DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -55,7 +55,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       true,
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "2fdc9086b7f945c610643e86e381f644a59fac94cf3cffba5cfd49a14c759fca"
+  "hash": "0756ded4341c084ed499ff1bc52b1541a9a1859e65a3d37e41cfa03e41de13f2"
 }

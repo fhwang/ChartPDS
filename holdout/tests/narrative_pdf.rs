@@ -47,7 +47,7 @@ const EXPECTED_CODINGS: [(&str, &str); 3] = [
 async fn seed_and_rebuild(server: &Harness) -> serde_json::Value {
     server.seed_archive_from_fixtures("narrative_pdf");
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(
         rebuild["narratives_ingested"], 1,
@@ -61,11 +61,11 @@ async fn seed_and_rebuild(server: &Harness) -> serde_json::Value {
     rebuild
 }
 
-/// Assert `list_problems` contains every artifact coding with its section
+/// Assert `problem_list` contains every artifact coding with its section
 /// label — the narrative-to-problems contract.
 async fn assert_codings_indexed(server: &Harness, context: &str) {
     let problems = server
-        .call_tool("list_problems", serde_json::Value::Null)
+        .call_tool("problem_list", serde_json::Value::Null)
         .await;
     let items = problems["items"].as_array().expect("items array");
     for (code, section_label) in EXPECTED_CODINGS {
@@ -94,11 +94,11 @@ async fn rebuild_replays_narrative_pdf_and_frozen_artifact_without_llm() {
     // snippet and the artifact-verified date.
     let hits = server
         .call_tool(
-            "search_narratives",
+            "narrative_search",
             serde_json::json!({ "query": "dysplasia" }),
         )
         .await;
-    let hits = hits.as_array().expect("hits array");
+    let hits = hits["items"].as_array().expect("items array");
     assert_eq!(hits.len(), 1, "expected one FTS hit: {hits:?}");
     let hit = &hits[0];
     assert_eq!(
@@ -119,8 +119,8 @@ async fn rebuild_replays_narrative_pdf_and_frozen_artifact_without_llm() {
     let doc_id = hit["source_document_id"].as_i64().expect("document id");
     let detail = server
         .call_tool(
-            "get_narrative",
-            serde_json::json!({ "document_id": doc_id }),
+            "narrative_get",
+            serde_json::json!({ "source_document_id": doc_id }),
         )
         .await;
     assert_eq!(detail["kind"], "clinical-pdf");
@@ -134,7 +134,7 @@ async fn rebuild_replays_narrative_pdf_and_frozen_artifact_without_llm() {
     assert_codings_indexed(&server, "after rebuild").await;
 }
 
-/// Absolute path to the fixture PDF blob, for `ingest_record` calls.
+/// Absolute path to the fixture PDF blob, for `record_ingest` calls.
 fn fixture_pdf_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
@@ -153,7 +153,7 @@ async fn keyless_ingest_fails_cleanly_with_nothing_persisted() {
 
     let err = server
         .try_call_tool(
-            "ingest_record",
+            "record_ingest",
             serde_json::json!({
                 "kind": "clinical-pdf",
                 "source": "holdout",
@@ -170,19 +170,19 @@ async fn keyless_ingest_fails_cleanly_with_nothing_persisted() {
     // Nothing searchable was left behind.
     let hits = server
         .call_tool(
-            "search_narratives",
+            "narrative_search",
             serde_json::json!({ "query": "dysplasia" }),
         )
         .await;
     assert_eq!(
-        hits.as_array().expect("hits array").len(),
+        hits["items"].as_array().expect("items array").len(),
         0,
         "failed ingest must leave no searchable text: {hits}"
     );
 
     // Nothing was archived either: a rebuild finds no narrative to replay.
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(
         rebuild["narratives_ingested"], 0,
@@ -205,7 +205,7 @@ async fn keyless_reingest_fails_and_preserves_verified_extraction() {
     // so extraction cannot run and the ingest must fail.
     let err = server
         .try_call_tool(
-            "ingest_record",
+            "record_ingest",
             serde_json::json!({
                 "kind": "clinical-pdf",
                 "source": "holdout",
@@ -223,17 +223,17 @@ async fn keyless_reingest_fails_and_preserves_verified_extraction() {
     assert_codings_indexed(&server, "after failed re-ingest").await;
     let hits = server
         .call_tool(
-            "search_narratives",
+            "narrative_search",
             serde_json::json!({ "query": "dysplasia" }),
         )
         .await;
-    let hits = hits.as_array().expect("hits array");
+    let hits = hits["items"].as_array().expect("items array");
     assert_eq!(hits.len(), 1, "document must still be indexed: {hits:?}");
     let doc_id = hits[0]["source_document_id"].as_i64().expect("document id");
     let detail = server
         .call_tool(
-            "get_narrative",
-            serde_json::json!({ "document_id": doc_id }),
+            "narrative_get",
+            serde_json::json!({ "source_document_id": doc_id }),
         )
         .await;
     assert_eq!(

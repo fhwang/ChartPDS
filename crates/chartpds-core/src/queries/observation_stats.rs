@@ -2,8 +2,9 @@
 //!
 //! Fetches the matching rows and computes count / mean / sample sd / min /
 //! max / p25 / p50 / p75 (plus optional threshold counts) in Rust —
-//! percentiles need the full sample, so unlike `duration_in_value_range`
-//! there is no SQL-side aggregation fast path. Bucketing (`day`, ISO `week`,
+//! percentiles need the full sample, so unlike the `DurationInRange` column
+//! aggregate in [`crate::queries::aligned_table`] there is no SQL-side
+//! aggregation fast path. Bucketing (`day`, ISO `week`,
 //! `month`, `day_of_week`) and the time-of-day fields are evaluated in the
 //! request timezone via jiff.
 
@@ -12,9 +13,13 @@ use std::collections::BTreeMap;
 use jiff::tz::TimeZone;
 use jiff::{Span, Timestamp};
 use sqlx::SqlitePool;
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::queries::episodes::{detect_episodes, episode_index_for, utc_instant_key};
+use crate::queries::aligned_table::EpisodeSpec;
+use crate::queries::episodes::{
+    detect_episodes, episode_index_for, fetch_all_intervals, utc_instant_key,
+};
 use crate::queries::roll_up_bucket_confidence;
 use crate::sources::DayConfidence;
 
@@ -47,8 +52,15 @@ pub enum StatsBucket {
     Month,
     /// Per day of week, keyed `mon` … `sun` (output Monday-first).
     DayOfWeek,
-    /// Per detected episode: a gap-tolerant chain of the coding's own
-    /// observations (intervals, or points when `effective_end` is null),
+    /// Per clock hour (local to the request timezone), keyed by the RFC 3339
+    /// top-of-hour instant with the local offset (`...Z` for UTC). Output
+    /// order is by instant, not by lexicographic string order: those two
+    /// diverge across a DST fall-back in a positive-UTC-offset zone (e.g.
+    /// Europe/Berlin), where the second occurrence of the repeated wall
+    /// hour has the smaller (`+01:00`) offset string but the later instant.
+    Hour,
+    /// Per detected episode of the [`ObservationStatsParams::episode`]
+    /// spec's coding: a gap-tolerant chain of its interval observations,
     /// keyed by the RFC 3339 UTC instant the episode began. An episode
     /// crossing a calendar-day boundary contributes to exactly one bucket.
     Episode,
@@ -66,6 +78,9 @@ pub enum ObservationStatsError {
     /// An internal date/time conversion failed unexpectedly.
     #[error("internal datetime error: {0}")]
     Internal(String),
+    /// `bucket` was episode but no episode spec was supplied.
+    #[error("bucket \"episode\" requires an episode spec")]
+    MissingEpisodeSpec,
 }
 
 /// Counts of field values below / at-or-above one threshold.
@@ -125,11 +140,11 @@ pub enum ObservationStats {
     /// Returned for [`StatsBucket::None`]: one flat stats object.
     Flat(StatsSummary),
     /// Returned for every other bucket: per-bucket stats, chronological
-    /// (day / week / month) or Monday-first (day of week). Empty buckets
-    /// are omitted.
+    /// (hour / day / week / month, hour ordered by instant) or Monday-first
+    /// (day of week). Empty buckets are omitted.
     Buckets {
         /// The non-empty buckets.
-        per_bucket: Vec<BucketStats>,
+        items: Vec<BucketStats>,
     },
 }
 
@@ -152,9 +167,9 @@ pub struct ObservationStatsParams<'a> {
     pub timezone: Option<&'a str>,
     /// Optional thresholds; each reports counts below / at-or-above.
     pub thresholds: Option<&'a [f64]>,
-    /// Maximum gap in seconds between consecutive observations that still
-    /// chains them into one episode. Only used by [`StatsBucket::Episode`].
-    pub gap_seconds: i64,
+    /// The coding whose intervals define episodes; required when `bucket`
+    /// is [`StatsBucket::Episode`].
+    pub episode: Option<EpisodeSpec<'a>>,
 }
 
 /// One fetched observation row plus its document's confidence keys.
@@ -210,8 +225,10 @@ pub(crate) fn field_value(
 ///
 /// Returns [`ObservationStatsError::Db`] if a query fails,
 /// [`ObservationStatsError::InvalidTimezone`] if `timezone` is not a known
-/// IANA zone name, or [`ObservationStatsError::Internal`] if an internal
-/// date/time conversion fails unexpectedly.
+/// IANA zone name, [`ObservationStatsError::MissingEpisodeSpec`] if `bucket`
+/// is [`StatsBucket::Episode`] without an `episode` spec, or
+/// [`ObservationStatsError::Internal`] if an internal date/time conversion
+/// fails unexpectedly.
 pub async fn observation_stats(
     pool: &SqlitePool,
     now: OffsetDateTime,
@@ -231,20 +248,26 @@ pub async fn observation_stats(
     )
     .await?;
 
-    // For episode buckets, chain the (start-ordered) rows themselves into
-    // episodes; a row without an end is a point interval.
-    let episodes = (params.bucket == StatsBucket::Episode).then(|| {
-        let intervals: Vec<(OffsetDateTime, OffsetDateTime)> = rows
-            .iter()
-            .map(|r| {
-                (
-                    r.effective_start,
-                    r.effective_end.unwrap_or(r.effective_start),
-                )
-            })
-            .collect();
-        detect_episodes(&intervals, params.gap_seconds)
-    });
+    // For episode buckets, chain the episode-spec coding's intervals into
+    // episodes (matching `aligned_table::detect_bucket_episodes`) — not the
+    // aggregated coding's own rows.
+    let episodes = match (params.bucket == StatsBucket::Episode, &params.episode) {
+        (false, _) => None,
+        (true, None) => return Err(ObservationStatsError::MissingEpisodeSpec),
+        (true, Some(spec)) => {
+            let all = fetch_all_intervals(
+                pool,
+                spec.coding_system,
+                spec.coding_code,
+                params.start,
+                params.end,
+            )
+            .await?;
+            let intervals: Vec<(OffsetDateTime, OffsetDateTime)> =
+                all.iter().map(|r| (r.start, r.end)).collect();
+            Some(detect_episodes(&intervals, spec.gap_seconds))
+        }
+    };
 
     let mut grouped: BTreeMap<(u8, String), Vec<f64>> = BTreeMap::new();
     let mut contributions: Vec<(String, String, Option<String>)> = Vec::new();
@@ -281,15 +304,40 @@ pub async fn observation_stats(
         )));
     }
 
-    Ok(ObservationStats::Buckets {
-        per_bucket: grouped
-            .into_iter()
-            .map(|((_, label), values)| BucketStats {
-                stats: summarize(&values, params.thresholds, confidence_for(&label)),
-                bucket_key: label,
-            })
-            .collect(),
-    })
+    let mut items: Vec<BucketStats> = grouped
+        .into_iter()
+        .map(|((_, label), values)| BucketStats {
+            stats: summarize(&values, params.thresholds, confidence_for(&label)),
+            bucket_key: label,
+        })
+        .collect();
+    if params.bucket == StatsBucket::Hour {
+        sort_by_hour_instant(&mut items, |item| &item.bucket_key)?;
+    }
+
+    Ok(ObservationStats::Buckets { items })
+}
+
+/// Reorder `items` by the instant each item's `Hour` bucket-key label
+/// encodes, rather than the label's lexicographic order.
+///
+/// `Hour` labels are RFC 3339 top-of-hour instants, and every offset a real
+/// IANA zone can produce parses cleanly, so a parse failure here indicates
+/// an internal bug in [`bucket_key`], not caller input.
+pub(crate) fn sort_by_hour_instant<T>(
+    items: &mut Vec<T>,
+    label: impl Fn(&T) -> &str,
+) -> Result<(), ObservationStatsError> {
+    let mut keyed = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        let instant = OffsetDateTime::parse(label(&item), &Rfc3339).map_err(|err| {
+            ObservationStatsError::Internal(format!("parsing hour bucket key: {err}"))
+        })?;
+        keyed.push((instant, item));
+    }
+    keyed.sort_by_key(|(instant, _)| *instant);
+    items.extend(keyed.into_iter().map(|(_, item)| item));
+    Ok(())
 }
 
 /// Fetch every matching row (with its document's confidence keys) for the
@@ -360,8 +408,11 @@ fn minutes_since_noon(dt: OffsetDateTime, tz: &TimeZone) -> Result<f64, Observat
 /// Sort-key + output label of the bucket `effective_start` falls in.
 ///
 /// The `u8` prefix keeps `day_of_week` buckets in Monday-first order inside a
-/// `BTreeMap`; it is 0 for every other bucket kind, whose labels already sort
-/// chronologically.
+/// `BTreeMap`; it is 0 for every other bucket kind. Every kind but `Hour`
+/// then has a label that sorts chronologically by string; `Hour` labels do
+/// not always (DST fall-back in a positive-UTC-offset zone), so callers that
+/// need chronological `Hour` output re-sort by parsed instant afterward
+/// (see [`observation_stats`]) rather than relying on this key's order.
 pub(crate) fn bucket_key(
     dt: OffsetDateTime,
     bucket: StatsBucket,
@@ -370,7 +421,8 @@ pub(crate) fn bucket_key(
     if bucket == StatsBucket::None {
         return Ok((0, String::new()));
     }
-    let date = to_zoned(dt, tz)?.datetime().date();
+    let zoned = to_zoned(dt, tz)?;
+    let date = zoned.datetime().date();
     match bucket {
         StatsBucket::None => Ok((0, String::new())),
         StatsBucket::Day => Ok((0, date.to_string())),
@@ -387,6 +439,30 @@ pub(crate) fn bucket_key(
             let idx = u8::try_from(date.weekday().to_monday_zero_offset())
                 .map_err(|err| ObservationStatsError::Internal(err.to_string()))?;
             Ok((idx, LABELS[usize::from(idx)].to_string()))
+        }
+        StatsBucket::Hour => {
+            let civ = zoned.datetime();
+            let offset_seconds = zoned.offset().seconds();
+            let (sign, abs) = if offset_seconds < 0 {
+                ('-', -offset_seconds)
+            } else {
+                ('+', offset_seconds)
+            };
+            let suffix = if offset_seconds == 0 {
+                "Z".to_string()
+            } else {
+                format!("{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
+            };
+            Ok((
+                0,
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:00:00{suffix}",
+                    civ.year(),
+                    civ.month(),
+                    civ.day(),
+                    civ.hour()
+                ),
+            ))
         }
         StatsBucket::Episode => Err(ObservationStatsError::Internal(
             "episode buckets are not calendar buckets".to_string(),
@@ -659,7 +735,7 @@ mod tests {
             bucket,
             timezone: None,
             thresholds: None,
-            gap_seconds: 0,
+            episode: None,
         }
     }
 
@@ -699,8 +775,8 @@ mod tests {
 
     fn expect_buckets(result: ObservationStats) -> Vec<BucketStats> {
         match result {
-            ObservationStats::Buckets { per_bucket } => per_bucket,
-            ObservationStats::Flat(_) => panic!("expected per_bucket stats"),
+            ObservationStats::Buckets { items } => items,
+            ObservationStats::Flat(_) => panic!("expected bucketed stats"),
         }
     }
 
@@ -962,13 +1038,13 @@ mod tests {
             },
         ])
         .await;
-        let result = observation_stats(
-            &pool,
-            NOW,
-            base_params(StatsField::Value, StatsBucket::Episode),
-        )
-        .await
-        .expect("query");
+        let mut params = base_params(StatsField::Value, StatsBucket::Episode);
+        params.episode = Some(EpisodeSpec {
+            coding_system: "http://loinc.org",
+            coding_code: "93832-4",
+            gap_seconds: 0,
+        });
+        let result = observation_stats(&pool, NOW, params).await.expect("query");
         let buckets = expect_buckets(result);
         // The midnight-crossing pair stays in ONE bucket keyed by its start.
         assert_eq!(buckets.len(), 2);
@@ -981,24 +1057,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn episode_bucket_treats_point_rows_as_their_own_episodes() {
-        // Point observations (no effective_end) with gap 0: each is its own
-        // episode keyed by its start instant.
+    async fn episode_bucket_ignores_point_rows_with_no_interval() {
+        // Point observations (no effective_end) never appear in
+        // `fetch_all_intervals`, so episode detection finds none and every
+        // row is excluded — point-observation self-chaining is intentionally
+        // dropped in favor of an explicit episode spec (issue #29).
         let (pool, _) = seed_observations(&nightly_specs()).await;
-        let result = observation_stats(
+        let mut params = base_params(StatsField::Value, StatsBucket::Episode);
+        params.episode = Some(EpisodeSpec {
+            coding_system: "http://loinc.org",
+            coding_code: "93832-4",
+            gap_seconds: 0,
+        });
+        let result = observation_stats(&pool, NOW, params).await.expect("query");
+        let buckets = expect_buckets(result);
+        assert!(buckets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_without_spec_is_an_error() {
+        let (pool, _) = seed_observations(&[]).await;
+        let err = observation_stats(
             &pool,
             NOW,
             base_params(StatsField::Value, StatsBucket::Episode),
         )
         .await
-        .expect("query");
-        let buckets = expect_buckets(result);
-        // Third spec has no value_quantity, so only two buckets have values.
-        assert_eq!(buckets.len(), 2);
-        assert_eq!(buckets[0].bucket_key, "2026-01-01T07:00:00Z");
-        assert_eq!(buckets[0].stats.count, 1);
-        assert_eq!(buckets[1].bucket_key, "2026-01-02T07:00:00Z");
-        assert_eq!(buckets[1].stats.count, 1);
+        .unwrap_err();
+        assert!(matches!(err, ObservationStatsError::MissingEpisodeSpec));
     }
 
     #[tokio::test]
@@ -1068,5 +1154,66 @@ mod tests {
         .expect("query");
         let s = expect_flat(result);
         assert_eq!(s.confidence, DayConfidence::Provisional);
+    }
+
+    #[test]
+    fn bucket_key_hour_utc_is_top_of_hour_z() {
+        let (idx, label) = bucket_key(
+            datetime!(2026-06-27 02:41:09 UTC),
+            StatsBucket::Hour,
+            &jiff::tz::TimeZone::UTC,
+        )
+        .expect("key");
+        assert_eq!(idx, 0);
+        assert_eq!(label, "2026-06-27T02:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn hour_bucket_dst_fall_back_orders_by_instant_in_positive_offset_zone() {
+        // Europe/Berlin falls back at 2026-10-25 03:00 CEST -> 02:00 CET
+        // (01:00 UTC). The repeated 02:00 wall hour's two occurrences must
+        // come out in instant order: +02:00 (earlier, UTC 00:30) before
+        // +01:00 (later, UTC 01:30) — the opposite of lexicographic string
+        // order, which would put "+01:00" first (issue #29 finding 1).
+        let (pool, _) = seed_observations(&[
+            ObsSpec {
+                coding_code: "93832-4",
+                coding_display: None,
+                effective_start: datetime!(2026-10-25 00:30:00 UTC),
+                value_quantity: Some(1.0),
+                value_unit: None,
+            },
+            ObsSpec {
+                coding_code: "93832-4",
+                coding_display: None,
+                effective_start: datetime!(2026-10-25 01:30:00 UTC),
+                value_quantity: Some(2.0),
+                value_unit: None,
+            },
+        ])
+        .await;
+        let mut params = base_params(StatsField::Value, StatsBucket::Hour);
+        params.start = datetime!(2026-10-25 00:00:00 UTC);
+        params.end = datetime!(2026-10-25 03:00:00 UTC);
+        params.timezone = Some("Europe/Berlin");
+        let result = observation_stats(&pool, NOW, params).await.expect("query");
+        let buckets = expect_buckets(result);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].bucket_key, "2026-10-25T02:00:00+02:00");
+        approx(buckets[0].stats.mean, 1.0);
+        assert_eq!(buckets[1].bucket_key, "2026-10-25T02:00:00+01:00");
+        approx(buckets[1].stats.mean, 2.0);
+    }
+
+    #[test]
+    fn bucket_key_hour_local_carries_offset() {
+        let tz = jiff::tz::TimeZone::get("America/New_York").expect("tz");
+        let (_, label) = bucket_key(
+            datetime!(2026-06-27 02:41:09 UTC), // 22:41 EDT on Jun 26
+            StatsBucket::Hour,
+            &tz,
+        )
+        .expect("key");
+        assert_eq!(label, "2026-06-26T22:00:00-04:00");
     }
 }

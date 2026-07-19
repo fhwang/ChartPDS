@@ -1,4 +1,4 @@
-//! Most-recent observation for a given coding code.
+//! Most-recent observation for a given coding.
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -6,22 +6,19 @@ use time::OffsetDateTime;
 use crate::index::Observation;
 use crate::queries::{annotate_observations, ObservationWithConfidence};
 
-/// Fetch the most-recent observation matching the given coding code.
+/// Fetch the most-recent observation matching the given coding.
 ///
 /// "Most recent" means the row with the latest `effective_start`. Returns
-/// `Ok(None)` if no observation matches the code.
-///
-/// Today every observation has `coding_system = "http://loinc.org"`; once
-/// non-LOINC codes land (e.g. AASM sleep stages) this signature will gain
-/// a `coding_system` parameter.
+/// `Ok(None)` if no observation matches `(coding_system, coding_code)`.
 ///
 /// # Errors
 ///
 /// Returns `sqlx::Error` if the query fails.
-pub async fn latest_by_code(
+pub async fn latest_by_coding(
     pool: &SqlitePool,
     now: OffsetDateTime,
-    code: &str,
+    coding_system: &str,
+    coding_code: &str,
 ) -> Result<Option<ObservationWithConfidence>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
@@ -32,11 +29,12 @@ pub async fn latest_by_code(
                effective_end AS "effective_end?: OffsetDateTime",
                value_quantity, value_string, value_unit
         FROM observations
-        WHERE coding_code = ?
+        WHERE coding_system = ? AND coding_code = ?
         ORDER BY effective_start DESC
         LIMIT 1
         "#,
-        code,
+        coding_system,
+        coding_code,
     )
     .fetch_optional(pool)
     .await?;
@@ -66,6 +64,8 @@ mod tests {
     use crate::queries::test_support::{seed_observations, ObsSpec};
     use time::macros::datetime;
 
+    const LOINC: &str = "http://loinc.org";
+
     #[tokio::test]
     async fn returns_none_when_no_observations_match_the_code() {
         let (pool, _) = seed_observations(&[ObsSpec {
@@ -77,9 +77,31 @@ mod tests {
         }])
         .await;
 
-        let result = latest_by_code(&pool, datetime!(2026-06-01 00:00:00 UTC), "8302-2")
+        let result = latest_by_coding(&pool, datetime!(2026-06-01 00:00:00 UTC), LOINC, "8302-2")
             .await
             .expect("query");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_system_does_not_match() {
+        let (pool, _) = seed_observations(&[ObsSpec {
+            coding_code: "29463-7",
+            coding_display: Some("Body Weight"),
+            effective_start: datetime!(2026-01-01 12:00:00 UTC),
+            value_quantity: Some(72.5),
+            value_unit: Some("kg"),
+        }])
+        .await;
+
+        let result = latest_by_coding(
+            &pool,
+            datetime!(2026-06-01 00:00:00 UTC),
+            "https://chartpds.fhwang.net/coding/aasm/sleep-stage",
+            "29463-7",
+        )
+        .await
+        .expect("query");
         assert!(result.is_none());
     }
 
@@ -94,7 +116,7 @@ mod tests {
         }])
         .await;
 
-        let result = latest_by_code(&pool, datetime!(2026-06-01 00:00:00 UTC), "29463-7")
+        let result = latest_by_coding(&pool, datetime!(2026-06-01 00:00:00 UTC), LOINC, "29463-7")
             .await
             .expect("query");
         let obs = result.expect("row present");
@@ -132,7 +154,7 @@ mod tests {
         ])
         .await;
 
-        let result = latest_by_code(&pool, datetime!(2026-06-01 00:00:00 UTC), "29463-7")
+        let result = latest_by_coding(&pool, datetime!(2026-06-01 00:00:00 UTC), LOINC, "29463-7")
             .await
             .expect("query");
         let obs = result.expect("row present");
@@ -163,12 +185,12 @@ mod tests {
         ])
         .await;
 
-        let weight = latest_by_code(&pool, datetime!(2026-06-01 00:00:00 UTC), "29463-7")
+        let weight = latest_by_coding(&pool, datetime!(2026-06-01 00:00:00 UTC), LOINC, "29463-7")
             .await
             .expect("query");
         assert_eq!(weight.unwrap().observation.value_quantity, Some(72.5));
 
-        let height = latest_by_code(&pool, datetime!(2026-06-01 00:00:00 UTC), "8302-2")
+        let height = latest_by_coding(&pool, datetime!(2026-06-01 00:00:00 UTC), LOINC, "8302-2")
             .await
             .expect("query");
         assert_eq!(height.unwrap().observation.value_quantity, Some(175.0));

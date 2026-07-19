@@ -182,13 +182,13 @@ pub async fn annotate_observations(
 /// flag a bucket based on a neighboring source-day.
 ///
 /// This roll-up is exact when the bucket key matches the day each
-/// contribution is grouped by (as `duration_in_value_range` does: it buckets
-/// each interval by its own day). Callers that attribute a multi-day span to
-/// a single bucket (e.g. `longest_continuous_in_value_range`, which
-/// attributes a run to its start day) may under-flag: a midnight-crossing
-/// run spanning a confirmed pre-midnight document and a provisional
-/// post-midnight document can leave the start-day bucket reading `confirmed`
-/// despite containing provisional data.
+/// contribution is grouped by (as the `DurationInRange` column aggregate
+/// does: it buckets each interval by its own day). Callers that attribute a
+/// multi-day span to a single bucket (e.g. the `LongestRunInRange` column
+/// aggregate, which attributes a run to its start bucket) may under-flag: a
+/// midnight-crossing run spanning a confirmed pre-midnight document and a
+/// provisional post-midnight document can leave the start bucket reading
+/// `confirmed` despite containing provisional data.
 ///
 /// # Errors
 ///
@@ -216,59 +216,6 @@ pub async fn roll_up_bucket_confidence(
         }
     }
     Ok(out)
-}
-
-/// Fetch each UTC-day bucket's contributing `(bucket_day, source, document_date)`
-/// rows for the given selection filter.
-///
-/// Shared by the bucketed range queries so their aggregation filter and this
-/// contribution filter cannot drift apart. Matches observations by
-/// `coding_system`/`coding_code`, `effective_start` in `[start, end)`, a
-/// non-null `effective_end`, and `value_quantity` within `[value_min, value_max]`,
-/// grouped by UTC day + document.
-///
-/// # Errors
-///
-/// Returns `sqlx::Error` if the query fails.
-pub(crate) async fn contributions_for_filter(
-    pool: &SqlitePool,
-    coding_system: &str,
-    coding_code: &str,
-    start: OffsetDateTime,
-    end: OffsetDateTime,
-    value_min: f64,
-    value_max: f64,
-) -> Result<Vec<(String, String, Option<String>)>, sqlx::Error> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT date(o.effective_start) AS "bucket!: String",
-               sd.source AS "source!: String",
-               sd.document_date AS "document_date?: String"
-        FROM observations o
-        JOIN source_documents sd ON o.source_document_id = sd.id
-        WHERE o.coding_system = ?
-          AND o.coding_code = ?
-          AND o.effective_start >= ?
-          AND o.effective_start < ?
-          AND o.effective_end IS NOT NULL
-          AND o.value_quantity >= ?
-          AND o.value_quantity <= ?
-        GROUP BY date(o.effective_start), sd.source, sd.document_date
-        "#,
-        coding_system,
-        coding_code,
-        start,
-        end,
-        value_min,
-        value_max,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.bucket, r.source, r.document_date))
-        .collect())
 }
 
 #[cfg(test)]

@@ -10,12 +10,10 @@ mod counts_per_code;
 mod current_medications;
 mod current_problems;
 mod day_confidence;
-mod duration_in_value_range;
 mod episodes;
 mod get_narrative;
-mod latest_by_code;
+mod latest_by_coding;
 mod list_notifications;
-mod longest_continuous_in_value_range;
 mod observation_history;
 mod observation_stats;
 mod search_narratives;
@@ -34,17 +32,9 @@ pub use day_confidence::{
     annotate_observations, resolve_source_day_confidence, roll_up_bucket_confidence,
     ObservationWithConfidence,
 };
-pub use duration_in_value_range::{
-    duration_in_value_range, Bucket, BucketMinutes, DurationInRange, DurationInRangeError,
-    DurationInValueRangeParams,
-};
 pub use get_narrative::{get_narrative, NarrativeCoding, NarrativeDetail};
-pub use latest_by_code::latest_by_code;
+pub use latest_by_coding::latest_by_coding;
 pub use list_notifications::list_recent_notifications;
-pub use longest_continuous_in_value_range::{
-    longest_continuous_in_value_range, BucketLongest, LongestBucket, LongestContinuousInRange,
-    LongestContinuousParams,
-};
 pub use observation_history::{observation_history, CodingKey};
 pub use observation_stats::{
     observation_stats, BucketStats, ObservationStats, ObservationStatsError,

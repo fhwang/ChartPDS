@@ -148,3 +148,17 @@ pub(crate) async fn seed_interval_observations(
 
     (pool, source_document_id)
 }
+
+/// Build a heart-rate (LOINC 8867-4) interval observation spec.
+///
+/// Shared by `aligned_table` and `signal_relationship` tests, which both
+/// exercise hour/longest-run/lag behavior against a heart-rate coding.
+pub(crate) fn hr_interval(start: OffsetDateTime, end: OffsetDateTime, v: f64) -> IntervalObsSpec {
+    IntervalObsSpec {
+        coding_system: crate::clinical::SYSTEM_LOINC,
+        coding_code: "8867-4",
+        effective_start: start,
+        effective_end: end,
+        value_quantity: v,
+    }
+}

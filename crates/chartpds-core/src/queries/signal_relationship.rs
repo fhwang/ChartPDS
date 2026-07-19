@@ -8,24 +8,32 @@
 //! either signal are excluded and `n_pairs` reflects only kept pairs.
 
 use sqlx::SqlitePool;
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::queries::aligned_table::{
-    aligned_table, AlignedTableError, AlignedTableParams, ColumnSpec, TableBucket,
+    aligned_table, resolve_timezone, AlignedTableError, AlignedTableParams, ColumnSpec,
+    EpisodeSpec, TableBucket,
 };
-use crate::queries::observation_stats::percentile;
+use crate::queries::observation_stats::{bucket_key, percentile};
+use crate::queries::StatsBucket;
 
 /// How to bucket both signals before pairing.
 ///
-/// Calendar buckets only: lag arithmetic needs an ordinal key space.
+/// Calendar buckets (including hour) pair by key arithmetic; episode
+/// buckets pair by row index (see [`signal_relationship`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationshipBucket {
+    /// Per clock hour, local to the request timezone.
+    Hour,
     /// Per local calendar day.
     Day,
     /// Per ISO week (keyed by Monday).
     Week,
     /// Per calendar month.
     Month,
+    /// Per detected episode of an episode coding (see [`EpisodeSpec`]).
+    Episode,
 }
 
 /// Parameters for [`signal_relationship`].
@@ -49,6 +57,9 @@ pub struct SignalRelationshipParams<'a> {
     /// Optional threshold on `x`: also report `y` summary statistics for
     /// pairs with `x` strictly below vs. at-or-above the threshold.
     pub x_threshold: Option<f64>,
+    /// Episode definition; required when `bucket` is
+    /// [`RelationshipBucket::Episode`].
+    pub episode: Option<EpisodeSpec<'a>>,
 }
 
 /// Summary statistics of the `y` values in one threshold group.
@@ -127,9 +138,11 @@ pub async fn signal_relationship(
     params: SignalRelationshipParams<'_>,
 ) -> Result<SignalRelationship, AlignedTableError> {
     let table_bucket = match params.bucket {
+        RelationshipBucket::Hour => TableBucket::Hour,
         RelationshipBucket::Day => TableBucket::Day,
         RelationshipBucket::Week => TableBucket::Week,
         RelationshipBucket::Month => TableBucket::Month,
+        RelationshipBucket::Episode => TableBucket::Episode,
     };
     let columns = [params.x, params.y];
     let table = aligned_table(
@@ -140,24 +153,46 @@ pub async fn signal_relationship(
             start: params.start,
             end: params.end,
             bucket: table_bucket,
-            episode: None,
+            episode: params.episode,
             timezone: params.timezone,
         },
     )
     .await?;
 
-    let mut y_by_bucket = std::collections::BTreeMap::new();
-    for row in &table.rows {
-        if let Some(y) = row.values[1] {
-            y_by_bucket.insert(row.bucket_key.as_str(), y);
-        }
-    }
     let mut pairs: Vec<(f64, f64)> = Vec::new();
-    for row in &table.rows {
-        let Some(x) = row.values[0] else { continue };
-        let y_key = shift_bucket_key(&row.bucket_key, params.bucket, params.lag_buckets)?;
-        if let Some(&y) = y_by_bucket.get(y_key.as_str()) {
-            pairs.push((x, y));
+    if params.bucket == RelationshipBucket::Episode {
+        for (i, row) in table.rows.iter().enumerate() {
+            let Some(x) = row.values[0] else { continue };
+            let Some(j) = i64::try_from(i)
+                .ok()
+                .and_then(|i| i.checked_add(params.lag_buckets))
+                .and_then(|j| usize::try_from(j).ok())
+            else {
+                continue;
+            };
+            if let Some(Some(y)) = table.rows.get(j).map(|r| r.values[1]) {
+                pairs.push((x, y));
+            }
+        }
+    } else {
+        let tz = resolve_timezone(params.timezone)?;
+        let mut y_by_bucket = std::collections::BTreeMap::new();
+        for row in &table.rows {
+            if let Some(y) = row.values[1] {
+                y_by_bucket.insert(row.bucket_key.as_deref().unwrap_or(""), y);
+            }
+        }
+        for row in &table.rows {
+            let Some(x) = row.values[0] else { continue };
+            let y_key = shift_bucket_key(
+                row.bucket_key.as_deref().unwrap_or(""),
+                params.bucket,
+                params.lag_buckets,
+                &tz,
+            )?;
+            if let Some(&y) = y_by_bucket.get(y_key.as_str()) {
+                pairs.push((x, y));
+            }
         }
     }
 
@@ -234,15 +269,32 @@ fn group_summary(mut values: Vec<f64>) -> GroupSummary {
 
 /// Shift a calendar bucket key by `lag` buckets.
 ///
-/// Day and week keys are `YYYY-MM-DD` (weeks shift by 7 days, staying on
-/// Mondays); month keys are `YYYY-MM`.
+/// Hour keys are RFC 3339 top-of-hour instants (shifted by `lag` hours and
+/// relabeled in `tz`); day and week keys are `YYYY-MM-DD` (weeks shift by 7
+/// days, staying on Mondays); month keys are `YYYY-MM`. Never called for
+/// [`RelationshipBucket::Episode`], which pairs by row index instead (see
+/// [`signal_relationship`]).
 fn shift_bucket_key(
     key: &str,
     bucket: RelationshipBucket,
     lag: i64,
+    tz: &jiff::tz::TimeZone,
 ) -> Result<String, AlignedTableError> {
     let internal = |err: String| AlignedTableError::Internal(err);
     match bucket {
+        RelationshipBucket::Hour => {
+            let instant = OffsetDateTime::parse(key, &Rfc3339)
+                .map_err(|err| internal(format!("unparseable hour bucket key {key:?}: {err}")))?;
+            let shifted = instant
+                .checked_add(time::Duration::hours(lag))
+                .ok_or_else(|| internal("lag shifts hour bucket out of range".to_string()))?;
+            let (_, label) = bucket_key(shifted, StatsBucket::Hour, tz)
+                .map_err(|err| internal(err.to_string()))?;
+            Ok(label)
+        }
+        RelationshipBucket::Episode => Err(internal(
+            "episode buckets pair by row index, not key shifting".to_string(),
+        )),
         RelationshipBucket::Day | RelationshipBucket::Week => {
             let date: jiff::civil::Date = key.parse().map_err(|err: jiff::Error| {
                 internal(format!("unparseable bucket key {key:?}: {err}"))
@@ -345,8 +397,11 @@ fn ranks(values: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queries::aligned_table::ColumnAggregate;
-    use crate::queries::test_support::{seed_observations, ObsSpec};
+    use crate::clinical::SYSTEM_LOINC;
+    use crate::queries::aligned_table::{ColumnAggregate, EpisodeSpec};
+    use crate::queries::test_support::{
+        hr_interval, seed_interval_observations, seed_observations, IntervalObsSpec, ObsSpec,
+    };
     use crate::queries::StatsField;
     use time::macros::datetime;
 
@@ -364,25 +419,41 @@ mod tests {
 
     #[test]
     fn shift_day_key_by_positive_and_negative_lag() {
-        let shifted = shift_bucket_key("2026-01-31", RelationshipBucket::Day, 1).expect("shift");
+        let utc = jiff::tz::TimeZone::UTC;
+        let shifted =
+            shift_bucket_key("2026-01-31", RelationshipBucket::Day, 1, &utc).expect("shift");
         assert_eq!(shifted, "2026-02-01");
-        let shifted = shift_bucket_key("2026-01-01", RelationshipBucket::Day, -1).expect("shift");
+        let shifted =
+            shift_bucket_key("2026-01-01", RelationshipBucket::Day, -1, &utc).expect("shift");
         assert_eq!(shifted, "2025-12-31");
     }
 
     #[test]
     fn shift_week_key_moves_whole_weeks() {
         // 2025-12-29 is a Monday; +1 week is the next Monday.
-        let shifted = shift_bucket_key("2025-12-29", RelationshipBucket::Week, 1).expect("shift");
+        let utc = jiff::tz::TimeZone::UTC;
+        let shifted =
+            shift_bucket_key("2025-12-29", RelationshipBucket::Week, 1, &utc).expect("shift");
         assert_eq!(shifted, "2026-01-05");
     }
 
     #[test]
     fn shift_month_key_crosses_year_boundary() {
-        let shifted = shift_bucket_key("2026-12", RelationshipBucket::Month, 1).expect("shift");
+        let utc = jiff::tz::TimeZone::UTC;
+        let shifted =
+            shift_bucket_key("2026-12", RelationshipBucket::Month, 1, &utc).expect("shift");
         assert_eq!(shifted, "2027-01");
-        let shifted = shift_bucket_key("2026-01", RelationshipBucket::Month, -2).expect("shift");
+        let shifted =
+            shift_bucket_key("2026-01", RelationshipBucket::Month, -2, &utc).expect("shift");
         assert_eq!(shifted, "2025-11");
+    }
+
+    #[test]
+    fn shift_hour_key_by_positive_lag_relabels_in_utc() {
+        let utc = jiff::tz::TimeZone::UTC;
+        let shifted = shift_bucket_key("2026-01-01T08:00:00Z", RelationshipBucket::Hour, 1, &utc)
+            .expect("shift");
+        assert_eq!(shifted, "2026-01-01T09:00:00Z");
     }
 
     #[test]
@@ -467,6 +538,7 @@ mod tests {
             timezone: None,
             lag_buckets: 0,
             x_threshold: None,
+            episode: None,
         }
     }
 
@@ -578,5 +650,90 @@ mod tests {
         approx(result.spearman_r, 1.0);
         let r = result.pearson_r.expect("pearson present");
         assert!(r < 1.0, "raw Pearson should be sub-1, got {r}");
+    }
+
+    #[tokio::test]
+    async fn episode_bucket_pairs_by_episode_index_with_lag() {
+        // Three sleep episodes; x = total-sleep summary (93832-4), y = same.
+        // With lag 1, episode i's x pairs with episode i+1's y: 2 pairs.
+        let night = |d: i64, minutes: f64| IntervalObsSpec {
+            coding_system: SYSTEM_LOINC,
+            coding_code: "93832-4",
+            effective_start: datetime!(2026-01-01 23:00:00 UTC) + time::Duration::days(d),
+            effective_end: datetime!(2026-01-02 06:00:00 UTC) + time::Duration::days(d),
+            value_quantity: minutes,
+        };
+        let (pool, _) =
+            seed_interval_observations(&[night(0, 400.0), night(1, 410.0), night(2, 420.0)]).await;
+        let col = ColumnSpec {
+            coding_system: SYSTEM_LOINC,
+            coding_code: "93832-4",
+            aggregate: ColumnAggregate::Mean,
+            field: StatsField::Value,
+        };
+        let result = signal_relationship(
+            &pool,
+            NOW,
+            SignalRelationshipParams {
+                x: col,
+                y: col,
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-10 00:00:00 UTC),
+                bucket: RelationshipBucket::Episode,
+                timezone: None,
+                lag_buckets: 1,
+                x_threshold: None,
+                episode: Some(EpisodeSpec {
+                    coding_system: SYSTEM_LOINC,
+                    coding_code: "93832-4",
+                    gap_seconds: 0,
+                }),
+            },
+        )
+        .await
+        .expect("query");
+        assert_eq!(result.n_pairs, 2);
+    }
+
+    #[tokio::test]
+    async fn hour_bucket_lag_pairs_adjacent_hours() {
+        // x at 08:xx and y at 09:xx; lag 1 pairs them.
+        let (pool, _) = seed_interval_observations(&[
+            hr_interval(
+                datetime!(2026-01-01 08:00:00 UTC),
+                datetime!(2026-01-01 08:05:00 UTC),
+                100.0,
+            ),
+            hr_interval(
+                datetime!(2026-01-01 09:00:00 UTC),
+                datetime!(2026-01-01 09:05:00 UTC),
+                60.0,
+            ),
+        ])
+        .await;
+        let col = ColumnSpec {
+            coding_system: SYSTEM_LOINC,
+            coding_code: "8867-4",
+            aggregate: ColumnAggregate::Mean,
+            field: StatsField::Value,
+        };
+        let result = signal_relationship(
+            &pool,
+            NOW,
+            SignalRelationshipParams {
+                x: col,
+                y: col,
+                start: datetime!(2026-01-01 00:00:00 UTC),
+                end: datetime!(2026-01-02 00:00:00 UTC),
+                bucket: RelationshipBucket::Hour,
+                timezone: None,
+                lag_buckets: 1,
+                x_threshold: None,
+                episode: None,
+            },
+        )
+        .await
+        .expect("query");
+        assert_eq!(result.n_pairs, 1);
     }
 }
