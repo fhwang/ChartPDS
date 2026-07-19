@@ -11,7 +11,7 @@
 //! Contracts being guarded:
 //!
 //! 1. **The LLM is called exactly once, at ingest — and never again.** A live
-//!    ingest makes one API call; `rebuild_index` makes zero, proven by
+//!    ingest makes one API call; `index_rebuild` makes zero, proven by
 //!    shutting the mock server down before rebuilding: if rebuild ever
 //!    regressed into calling a model, it would hit a dead port instead of
 //!    silently spending money against the real API.
@@ -20,7 +20,7 @@
 //!    reported in `rejected` — the hallucination guard.
 //! 3. **A sustained LLM outage fails the ingest cleanly.** Transient failures
 //!    are retried in-band (three attempts, bounded — never unbounded
-//!    hammering); a still-failing API then fails the `ingest_record` call
+//!    hammering); a still-failing API then fails the `record_ingest` call
 //!    with NOTHING persisted — no partial text-only state to reconcile later,
 //!    nothing for rebuild to resurrect — and the identical ingest succeeds
 //!    once the API recovers.
@@ -75,11 +75,11 @@ fn scripted_extraction() -> serde_json::Value {
     })
 }
 
-/// Ingest the synthetic PDF through `ingest_record` and return the outcome.
+/// Ingest the synthetic PDF through `record_ingest` and return the outcome.
 async fn ingest_fixture_pdf(server: &Harness) -> serde_json::Value {
     server
         .call_tool(
-            "ingest_record",
+            "record_ingest",
             serde_json::json!({
                 "kind": "clinical-pdf",
                 "source": "holdout",
@@ -115,7 +115,7 @@ async fn live_extraction_calls_llm_once_and_rebuild_never_calls_again() {
     // entirely from the archive + derived store, with no model call.
     mock.shutdown();
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(rebuild["narratives_ingested"], 1, "{rebuild}");
     assert_eq!(rebuild["extractions_applied"], 1, "{rebuild}");
@@ -128,7 +128,7 @@ async fn live_extraction_calls_llm_once_and_rebuild_never_calls_again() {
 
     // The verified codings survived the rebuild.
     let problems = server
-        .call_tool("list_problems", serde_json::Value::Null)
+        .call_tool("problem_list", serde_json::Value::Null)
         .await;
     let items = problems["items"].as_array().expect("items");
     for code in ["R10.9", "Z12.11", "K64.8"] {
@@ -169,7 +169,7 @@ async fn hallucinated_coding_is_rejected_and_never_indexed() {
     );
 
     let problems = server
-        .call_tool("list_problems", serde_json::Value::Null)
+        .call_tool("problem_list", serde_json::Value::Null)
         .await;
     let items = problems["items"].as_array().expect("items");
     assert!(
@@ -197,7 +197,7 @@ async fn llm_outage_fails_ingest_cleanly_and_reingest_recovers() {
 
     let err = server
         .try_call_tool(
-            "ingest_record",
+            "record_ingest",
             serde_json::json!({
                 "kind": "clinical-pdf",
                 "source": "holdout",
@@ -217,17 +217,17 @@ async fn llm_outage_fails_ingest_cleanly_and_reingest_recovers() {
     // (nothing for rebuild to replay).
     let hits = server
         .call_tool(
-            "search_narratives",
+            "narrative_search",
             serde_json::json!({ "query": "dysplasia" }),
         )
         .await;
     assert_eq!(
-        hits.as_array().map(Vec::len),
+        hits["items"].as_array().map(Vec::len),
         Some(0),
         "failed ingest must not index text: {hits}"
     );
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(
         rebuild["narratives_ingested"], 0,

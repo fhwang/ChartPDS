@@ -4,9 +4,9 @@
 //! the product contract — fix `crates/**`, never edit this file or its fixtures
 //! to make it pass. Changes under `holdout/` require a human-signed bless commit.
 //!
-//! Locks the contract that `observation_duration_in_range` with
-//! `bucket:"episode"` answers "minutes of deep sleep per sleep period" in one
-//! call, with one row per sleep period:
+//! Locks the contract that `observation_table` with a `duration_in_range`
+//! column and `bucket:"episode"` answers "minutes of deep sleep per sleep
+//! period" in one call, with one row per sleep period:
 //!
 //! 1. A sleep period crossing a calendar-day boundary contributes to exactly
 //!    ONE bucket (never split across two), keyed by the RFC 3339 UTC instant
@@ -30,7 +30,7 @@ async fn deep_sleep_per_sleep_period_is_one_bucket_per_episode() {
     server.seed_archive_from_fixtures("episode_sleep_nights");
 
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(
         rebuild["oura_ingested"], 2,
@@ -41,50 +41,58 @@ async fn deep_sleep_per_sleep_period_is_one_bucket_per_episode() {
     // result row per sleep period, keyed by when the episode began.
     let episodes = server
         .call_tool(
-            "observation_duration_in_range",
+            "observation_table",
             serde_json::json!({
-                "coding": { "system": AASM_SYSTEM, "code": AASM_CODE },
+                "columns": [{
+                    "coding": { "system": AASM_SYSTEM, "code": AASM_CODE },
+                    "aggregate": "duration_in_range",
+                    "value_min": 3.0, "value_max": 3.0 // AASM N3 (deep)
+                }],
                 "start": "2026-06-26T00:00:00Z",
                 "end":   "2026-06-29T00:00:00Z",
-                "value_min": 3.0, "value_max": 3.0, // AASM N3 (deep)
-                "bucket": "episode"
+                "bucket": "episode",
+                "episode": { "coding": { "system": AASM_SYSTEM, "code": AASM_CODE } }
             }),
         )
         .await;
-    let rows = episodes["per_bucket"].as_array().expect("per_bucket array");
+    let rows = episodes["rows"].as_array().expect("rows array");
     assert_eq!(
         rows.len(),
         2,
         "exactly one bucket per sleep period: {episodes}"
     );
-    assert_eq!(rows[0]["bucket_start"], "2026-06-26T23:40:00Z");
+    assert_eq!(rows[0]["bucket_key"], "2026-06-26T23:40:00Z");
     assert_eq!(
-        rows[0]["total_minutes"], 20.0,
+        rows[0]["values"],
+        serde_json::json!([20.0]),
         "the midnight-crossing night's 20 deep minutes stay whole in one \
          bucket: {episodes}"
     );
-    assert_eq!(rows[1]["bucket_start"], "2026-06-27T23:00:00Z");
-    assert_eq!(rows[1]["total_minutes"], 5.0);
+    assert_eq!(rows[1]["bucket_key"], "2026-06-27T23:00:00Z");
+    assert_eq!(rows[1]["values"], serde_json::json!([5.0]));
 
     // Contrast: UTC day bucketing splits night 1's deep minutes across both
     // calendar days (10 + 10, with night 2's 5 joining 06-27) — the exact
     // failure mode episode bucketing exists to avoid.
     let days = server
         .call_tool(
-            "observation_duration_in_range",
+            "observation_table",
             serde_json::json!({
-                "coding": { "system": AASM_SYSTEM, "code": AASM_CODE },
+                "columns": [{
+                    "coding": { "system": AASM_SYSTEM, "code": AASM_CODE },
+                    "aggregate": "duration_in_range",
+                    "value_min": 3.0, "value_max": 3.0
+                }],
                 "start": "2026-06-26T00:00:00Z",
                 "end":   "2026-06-29T00:00:00Z",
-                "value_min": 3.0, "value_max": 3.0,
                 "bucket": "day"
             }),
         )
         .await;
-    let day_rows = days["per_bucket"].as_array().expect("per_bucket array");
+    let day_rows = days["rows"].as_array().expect("rows array");
     assert_eq!(day_rows.len(), 2, "{days}");
-    assert_eq!(day_rows[0]["bucket_start"], "2026-06-26");
-    assert_eq!(day_rows[0]["total_minutes"], 10.0);
-    assert_eq!(day_rows[1]["bucket_start"], "2026-06-27");
-    assert_eq!(day_rows[1]["total_minutes"], 15.0);
+    assert_eq!(day_rows[0]["bucket_key"], "2026-06-26");
+    assert_eq!(day_rows[0]["values"], serde_json::json!([10.0]));
+    assert_eq!(day_rows[1]["bucket_key"], "2026-06-27");
+    assert_eq!(day_rows[1]["values"], serde_json::json!([15.0]));
 }

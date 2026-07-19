@@ -15,7 +15,7 @@
 //!
 //! Reproduction through the black-box surface: plant two overlapping Fitbit HR
 //! blobs for the same day (a 2-sample pull archived earlier, a 3-sample pull
-//! archived later) into the archive, then `rebuild_index` to replay them. The
+//! archived later) into the archive, then `index_rebuild` to replay them. The
 //! day must collapse to the newest pull's samples — not the sum across both
 //! documents.
 
@@ -35,24 +35,24 @@ async fn fitbit_reingested_day_does_not_duplicate_heart_rate() {
 
     // Replay the archive into the index.
     let rebuild = server
-        .call_tool("rebuild_index", serde_json::Value::Null)
+        .call_tool("index_rebuild", serde_json::Value::Null)
         .await;
     assert_eq!(
         rebuild["fitbit_ingested"], 2,
         "both Fitbit blobs should be replayed: {rebuild}"
     );
 
-    // get_observation_history must return only the newest pull's three samples,
+    // observation_history must return only the newest pull's three samples,
     // each at a distinct timestamp — not 2 + 3 = 5 rows with repeated timestamps.
     let history = server
         .call_tool(
-            "get_observation_history",
+            "observation_history",
             serde_json::json!({
                 "codings": [{ "system": "http://loinc.org", "code": HEART_RATE }]
             }),
         )
         .await;
-    let rows = history.as_array().expect("history array");
+    let rows = history["items"].as_array().expect("items array");
     assert_eq!(
         rows.len(),
         3,
@@ -72,19 +72,19 @@ async fn fitbit_reingested_day_does_not_duplicate_heart_rate() {
         "every observation must have a distinct effective_start: {history}"
     );
 
-    // observation_counts — the tool the bug report showed reporting millions of
-    // phantom samples — must report the true count for 8867-4.
+    // observation_codings — the tool the bug report showed reporting millions
+    // of phantom samples — must report the true count for 8867-4.
     let counts = server
-        .call_tool("observation_counts", serde_json::Value::Null)
+        .call_tool("observation_codings", serde_json::Value::Null)
         .await;
-    let entry = counts
+    let entry = counts["items"]
         .as_array()
-        .expect("counts array")
+        .expect("items array")
         .iter()
         .find(|c| c["coding_code"] == HEART_RATE)
         .unwrap_or_else(|| panic!("no 8867-4 entry in counts: {counts}"));
     assert_eq!(
         entry["count"], 3,
-        "observation_counts must not inflate by the duplicate-document factor: {counts}"
+        "observation_codings must not inflate by the duplicate-document factor: {counts}"
     );
 }

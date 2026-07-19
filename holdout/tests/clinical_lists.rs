@@ -7,7 +7,7 @@
 
 use chartpds_holdout::{fixture, Harness};
 
-/// After ingesting a CCDA with one problem, `list_problems` reports exactly that
+/// After ingesting a CCDA with one problem, `problem_list` reports exactly that
 /// problem, deduped to one entry with its provenance.
 #[tokio::test]
 async fn list_problems_reports_ingested_diabetes() {
@@ -15,7 +15,7 @@ async fn list_problems_reports_ingested_diabetes() {
     server.ingest_ccda(&fixture("diabetes_minimal.xml")).await;
 
     let result = server
-        .call_tool("list_problems", serde_json::Value::Null)
+        .call_tool("problem_list", serde_json::Value::Null)
         .await;
 
     assert!(
@@ -28,14 +28,14 @@ async fn list_problems_reports_ingested_diabetes() {
     assert_eq!(items[0]["document_count"], 1);
 }
 
-/// `list_medications` reports the ingested medication, deduped per code.
+/// `medication_list` reports the ingested medication, deduped per code.
 #[tokio::test]
 async fn list_medications_reports_ingested_metformin() {
     let server = Harness::start().await;
     server.ingest_ccda(&fixture("diabetes_minimal.xml")).await;
 
     let result = server
-        .call_tool("list_medications", serde_json::Value::Null)
+        .call_tool("medication_list", serde_json::Value::Null)
         .await;
 
     let items = result["items"].as_array().expect("items array");
@@ -44,7 +44,7 @@ async fn list_medications_reports_ingested_metformin() {
     assert_eq!(items[0]["document_count"], 1);
 }
 
-/// A vital sign round-trips through ingest and `latest_observation_by_code`
+/// A vital sign round-trips through ingest and `observation_latest`
 /// with its value intact.
 #[tokio::test]
 async fn latest_observation_round_trips_body_weight() {
@@ -53,8 +53,10 @@ async fn latest_observation_round_trips_body_weight() {
 
     let result = server
         .call_tool(
-            "latest_observation_by_code",
-            serde_json::json!({ "code": "29463-7" }),
+            "observation_latest",
+            serde_json::json!({
+                "coding": { "system": "http://loinc.org", "code": "29463-7" }
+            }),
         )
         .await;
 
@@ -63,7 +65,7 @@ async fn latest_observation_round_trips_body_weight() {
 }
 
 /// A lab result is queryable by its LOINC coding through
-/// `get_observation_history`.
+/// `observation_history`.
 #[tokio::test]
 async fn observation_history_returns_lab_result() {
     let server = Harness::start().await;
@@ -71,14 +73,14 @@ async fn observation_history_returns_lab_result() {
 
     let result = server
         .call_tool(
-            "get_observation_history",
+            "observation_history",
             serde_json::json!({
                 "codings": [{ "system": "http://loinc.org", "code": "4548-4" }]
             }),
         )
         .await;
 
-    let rows = result.as_array().expect("history array");
+    let rows = result["items"].as_array().expect("items array");
     assert_eq!(rows.len(), 1, "expected one HbA1c observation: {result}");
     assert_eq!(rows[0]["coding_code"], "4548-4");
     assert_eq!(rows[0]["value_quantity"], 5.5);

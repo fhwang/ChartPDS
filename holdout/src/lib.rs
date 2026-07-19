@@ -3,7 +3,7 @@
 //! The holdout suite drives the real `chartpds-mcp` server binary over stdio,
 //! exactly as an MCP client would: it spawns the process against a throwaway
 //! `CHARTPDS_DATA_DIR`, completes the MCP initialize handshake, and calls the
-//! product-surface tools (`ingest_record`, `list_problems`, …), asserting on
+//! product-surface tools (`record_ingest`, `problem_list`, …), asserting on
 //! the JSON they return.
 //!
 //! Binding to the tool surface — not `chartpds-core`'s churning Rust API — is
@@ -161,7 +161,7 @@ impl Harness {
     /// This is the only black-box way to exercise the adapter (Fitbit/Oura)
     /// ingest path: their live path needs network/OAuth, but pre-built archive
     /// blobs and their `.meta.json` sidecars can be committed as fixtures,
-    /// planted here, and replayed by calling the `rebuild_index` tool.
+    /// planted here, and replayed by calling the `index_rebuild` tool.
     ///
     /// # Panics
     ///
@@ -185,14 +185,14 @@ impl Harness {
         }
     }
 
-    /// Ingest an inline CCDA document via the `ingest_record` tool.
+    /// Ingest an inline CCDA document via the `record_ingest` tool.
     ///
     /// # Panics
     ///
     /// Panics if ingestion fails (see [`Harness::call_tool`]).
     pub async fn ingest_ccda(&self, xml: &str) {
         self.call_tool(
-            "ingest_record",
+            "record_ingest",
             serde_json::json!({
                 "content": xml,
                 "kind": "ccda",
