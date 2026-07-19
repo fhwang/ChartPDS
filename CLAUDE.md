@@ -32,8 +32,15 @@ docs are reliable and must be kept current:
 - Sync daemon and the fetch rule: `sync/mod.rs`, `sources/confidence.rs`
 - Notifications: `notifications/mod.rs`
 
-When you change behavior, update the module/item docs in the same diff —
-they are the primary documentation; this file only routes to them.
+User-facing docs live in `README.md`: what the server does, harness
+registration, a grouped orientation map of the tool surface, and the
+configuration table. Its driftable parts are exactly those two lists — a
+change to the tool surface or to configuration variables updates the
+README in the same diff.
+
+When you change behavior, update the module/item docs (and, when
+user-visible, the README) in the same diff — they are the primary
+documentation; this file only routes to them.
 
 ## Toolchain
 

@@ -72,7 +72,10 @@ The tool surface, grouped:
 
 ## Configuration
 
-All configuration is by environment variable (see `.env.example`):
+All configuration is by environment variable — there is no config file, and
+no `.env` file is read. When invoked by a harness, supply variables in the
+harness's MCP config (the `env` block above); for direct runs, export them
+in the shell:
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
