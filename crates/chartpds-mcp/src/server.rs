@@ -1,4 +1,17 @@
 //! The MCP server struct + tool handlers.
+//!
+//! The tool surface is defined entirely by the `#[tool(...)]`-annotated
+//! methods in the `#[tool_router]` block below; their `description` strings
+//! are the canonical per-tool documentation (MCP clients receive them
+//! verbatim), so they are not re-enumerated anywhere else.
+//!
+//! Adding a tool: define an `async fn` on the `ChartPdsServer` impl inside
+//! the `#[tool_router]` block, annotate it with
+//! `#[tool(description = "...")]`, take args via `Parameters<YourArgs>`
+//! where `YourArgs: Deserialize + JsonSchema`, and return
+//! `Result<CallToolResult, McpError>`. Test by constructing the server
+//! directly in a `#[tokio::test]` and calling the method — no stdio
+//! transport needed.
 
 use chartpds_core::archive::Archive;
 use chartpds_core::ingestion::NarrativeIngestParams;

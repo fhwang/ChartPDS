@@ -2,6 +2,13 @@
 //!
 //! Fetches heart-rate data from Google Health's v4 API and converts the
 //! point-in-time samples into interval observations suitable for the index.
+//!
+//! Setup: create a Google Cloud project with the Health API enabled and an
+//! OAuth 2.0 "Desktop app" client, set `GOOGLE_HEALTH_CLIENT_ID` and
+//! `GOOGLE_HEALTH_CLIENT_SECRET` in the server's environment, then call the
+//! `source_connect` MCP tool with `source="fitbit"` (opens a browser
+//! authorization; the server catches the callback and stores credentials)
+//! and `source_sync` to pull recent data.
 
 pub(crate) mod api;
 pub mod confidence;

@@ -1,8 +1,31 @@
-//! Confidence tracking types and date helpers.
+//! Confidence tracking: shared types, date helpers, and the fetch rule.
 //!
-//! Each adapter has a per-day confidence model that determines whether a
-//! day's data is settled (`Confirmed`) or may still change (`Provisional`).
-//! The sync daemon skips confirmed days to avoid redundant API calls.
+//! Sync decides which days to fetch by separating two distinct questions:
+//!
+//! - **Coverage** — "do we already have this day?" A day is covered when it
+//!   has a `source_day_state` row (a successful prior ingest).
+//! - **Settledness** — "might this day still change?" The per-adapter
+//!   confidence model: [`DayConfidence::Confirmed`] (settled) or
+//!   [`DayConfidence::Provisional`] (may change).
+//!
+//! The general fetch rule every adapter follows: fetch a day if it is
+//! **uncovered OR unsettled**; skip it only when it is **covered AND
+//! settled** ([`select_fetch_dates`]). This keeps backfill correct — a
+//! never-fetched historical day is always pulled regardless of age — while
+//! avoiding redundant re-pulls of old, stable days. Ingestion-time dedup
+//! (the UNIQUE-constraint catch) is a safety net, not the primary
+//! correctness mechanism.
+//!
+//! Why the rule folds in coverage: an earlier Oura bug gated fetching on
+//! settledness alone. Oura settledness is purely time-based, so every day
+//! older than ~24h was "settled" and skipped — backfill silently fetched
+//! only the last day.
+//!
+//! Per-adapter confidence functions are pure (no async, no database) and
+//! live in each adapter's `confidence.rs`: Fitbit's is stability-based
+//! (force-refresh window, freshness frontier, two consecutive pulls with
+//! equal sample counts), Oura's is time-based (confirmed 24 hours after the
+//! day ends — sleep data settles quickly).
 
 /// Whether a day's data is settled or may still change.
 ///
