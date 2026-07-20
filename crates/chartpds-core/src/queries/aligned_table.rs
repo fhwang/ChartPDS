@@ -5,6 +5,15 @@
 //! table already joined by bucket — no client-side re-keying. Each column
 //! reduces a coding's observations in a bucket to a single value via an
 //! aggregate; a bucket the coding never touched reads `null`.
+//!
+//! The two in-range aggregates attribute time differently, and the
+//! difference is intentional: `duration_in_range` credits each interval to
+//! the bucket containing its start (a run of intervals crossing a bucket
+//! boundary has its minutes split across both buckets), while
+//! `longest_run_in_range` chains runs window-wide and credits each whole
+//! run to the bucket containing the run's start (a boundary-crossing run
+//! lands wholly in one bucket). Per-bucket totals from the two aggregates
+//! therefore need not reconcile for a run that straddles a boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
 

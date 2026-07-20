@@ -11,6 +11,18 @@
 //! - [`queries`] exposes analytical reads over the index.
 //! - [`sync`] orchestrates the loop on a schedule.
 //! - [`notifications`] dispatches out-of-band events on failures.
+//!
+//! Data lives in three storage tiers, in decreasing order of sanctity:
+//!
+//! - **archive** (`$DIR/archive/`) — bytes that arrived from outside, raw
+//!   and untouched. The system of record; never GC'd.
+//! - **derived** (`$DIR/derived/`) — machine-generated derivations that are
+//!   expensive to recreate (LLM extraction output is non-deterministic and
+//!   costs money, so it is persisted, not recomputed on rebuild). Same
+//!   content-addressed store type as the archive; versioned via each
+//!   artifact's `extractor` `{model, prompt_version}`.
+//! - **index** (`$DIR/chartpds.db`) — the disposable `SQLite` projection,
+//!   rebuilt from the two blob stores by [`ingestion::rebuild_index`].
 
 pub mod archive;
 pub mod clinical;

@@ -1,9 +1,13 @@
 //! Analytical reads over the index.
 //!
-//! Each function is a generic primitive that future MCP tools and CLI
-//! subcommands will compose into named queries. No tool surface lives
-//! here; this module is read-shaped (free functions, no state) and
-//! deliberately small.
+//! Each function is a generic primitive `(&SqlitePool, args) -> Result<T>`
+//! — free functions, no shared state, no query-builder structs. The MCP
+//! tool surface lives in the binary crate (`chartpds-mcp`), which composes
+//! these primitives into named tools; nothing here knows about MCP.
+//!
+//! The `pub use` re-exports below are the full catalog; each query file's
+//! docs carry its semantics. To add a primitive: new file here, `mod` +
+//! `pub use` in this file, then `just prepare-sql` to cache its SQL.
 
 mod aligned_table;
 mod counts_per_code;

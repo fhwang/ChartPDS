@@ -4,6 +4,26 @@
 //! low-level CRUD per table. Consumers (`ingestion`, `queries`, `sync`) hold
 //! a `sqlx::SqlitePool` produced by this module and call typed query
 //! functions from here.
+//!
+//! `sqlx` compile-time SQL verification runs in **offline mode**: builds
+//! read the committed `.sqlx/query-*.json` cache at the workspace root and
+//! never connect to a live database. After changing `migrations/*.sql` or
+//! any `sqlx::query!`/`sqlx::query_as!` invocation, run `just prepare-sql`
+//! and commit the cache update alongside the change.
+//!
+//! Two column-type override patterns recur, because `SQLite` metadata is
+//! sparse on nullability:
+//!
+//! - `INTEGER PRIMARY KEY` and `REFERENCES` columns are inferred as
+//!   `Option<i64>`; force the non-null type with
+//!   `RETURNING id AS "id!: i64"` (or `SELECT id AS "id!: i64"`).
+//! - Nullable timestamp columns mapped to `OffsetDateTime` need the
+//!   nullable suffix: `effective_end AS "effective_end?: OffsetDateTime"`.
+//!
+//! Migrations are forward-only: there are no down migrations. A wrong
+//! migration is corrected by a follow-up forward migration — the
+//! archive-as-truth model makes rebuilds cheap, so schema mistakes are
+//! recoverable by re-ingest.
 
 mod clear;
 mod medications;

@@ -5,6 +5,14 @@
 //! [`ingest_narrative_pdf`] (the narrative-PDF orchestrator), and [`Error`].
 //! Everything else is internal — the parser, self-check, and per-section
 //! extractors live in [`ccda`](self::ccda).
+//!
+//! [`ingest`] is the canonical CCDA write path: archive blob + manifest →
+//! parse → extract → one `source_documents` row plus one row per extracted
+//! item. It deliberately runs without a transaction: if the process dies
+//! mid-ingest, the archived bytes are durable — re-run from the archive.
+//! Four CCDA sections are extracted today: vital signs and lab results
+//! (both stored as observations — a lab draw is just an observation with a
+//! lab LOINC code), problems (diagnoses), and medications (prescriptions).
 
 mod ccda;
 mod error;
