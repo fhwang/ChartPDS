@@ -5,6 +5,11 @@ on:
     - cron: '0 7 * * 1' # Mondays 07:00 UTC
   workflow_dispatch:
 
+# `pull-requests: write` alone is not enough for `gh pr create` with the
+# default GITHUB_TOKEN: the repo setting "Allow GitHub Actions to create and
+# approve pull requests" (Settings → Actions → General → Workflow permissions)
+# must also be enabled, or the PR step fails with "GitHub Actions is not
+# permitted to create or approve pull requests".
 permissions:
   contents: write
   pull-requests: write
