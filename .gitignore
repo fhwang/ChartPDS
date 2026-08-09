@@ -11,6 +11,9 @@
 # Claude Code local (machine-specific settings and worktrees)
 .claude/
 
+# Git worktrees (one per branch; see CLAUDE.md "Workspaces")
+.worktrees/
+
 # Local toolchain manager config (personal; rust-toolchain.toml is the source of truth)
 mise.toml
 

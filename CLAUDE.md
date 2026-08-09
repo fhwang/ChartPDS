@@ -49,6 +49,12 @@ documentation; this file only routes to them.
   complete — it chains `fmt-check`, `lint`, `typecheck`, `test`, `cargo deny`,
   and `cargo machete`.
 
+## Workspaces
+
+Always work in a git worktree, never directly in the main checkout: one
+worktree per branch under `.worktrees/<branch>` (git-ignored). The main
+checkout stays on `main`.
+
 ## Lint policy
 
 **Never bypass a lint rule. Fix the actual problem.**
