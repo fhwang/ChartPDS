@@ -75,6 +75,7 @@ mod tests {
                 value_quantity: Some(72.5),
                 value_string: None,
                 value_unit: Some("kg"),
+                derivation: "structured",
             },
         )
         .await

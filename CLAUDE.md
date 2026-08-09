@@ -23,10 +23,10 @@ docs are reliable and must be kept current:
   patterns in `crates/chartpds-core/src/index/mod.rs`
 - Archive/manifest model: `archive/mod.rs` and `archive/manifest.rs`
 - Ingestion and the narrative/LLM pipeline: `ingestion/mod.rs`,
-  `ingestion/narrative.rs`, `extraction/` (CCDA parsing quirks are on the
-  extractors themselves, e.g. the LDL-C `nullFlavor` fallback on
-  `extract_pq_value` in `ingestion/ccda/results.rs` — do not "simplify"
-  documented fallbacks away)
+  `ingestion/narrative.rs`, `ingestion/journal.rs`, `extraction/`,
+  `extraction/journal.rs` (CCDA parsing quirks are on the extractors
+  themselves, e.g. the LDL-C `nullFlavor` fallback on `extract_pq_value` in
+  `ingestion/ccda/results.rs` — do not "simplify" documented fallbacks away)
 - Adapters (setup steps, encodings): `sources/fitbit/mod.rs`,
   `sources/oura/mod.rs`
 - Sync daemon and the fetch rule: `sync/mod.rs`, `sources/confidence.rs`
@@ -48,6 +48,12 @@ documentation; this file only routes to them.
 - Task orchestration via `just`. Run `just check` before declaring any change
   complete — it chains `fmt-check`, `lint`, `typecheck`, `test`, `cargo deny`,
   and `cargo machete`.
+
+## Workspaces
+
+Always work in a git worktree, never directly in the main checkout: one
+worktree per branch under `.worktrees/<branch>` (git-ignored). The main
+checkout stays on `main`.
 
 ## Lint policy
 

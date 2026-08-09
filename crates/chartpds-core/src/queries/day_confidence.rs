@@ -378,6 +378,7 @@ mod tests {
                 value_quantity: Some(72.0),
                 value_string: None,
                 value_unit: None,
+                derivation: "structured",
             },
         )
         .await
@@ -393,6 +394,7 @@ mod tests {
             value_quantity: Some(72.0),
             value_string: None,
             value_unit: None,
+            derivation: "structured".to_owned(),
         }
     }
 

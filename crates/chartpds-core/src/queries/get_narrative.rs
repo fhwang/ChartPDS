@@ -135,6 +135,7 @@ mod tests {
                 status: "unknown",
                 onset_date: Some("2026-04-21"),
                 section_label: Some("Pre-Op Diagnosis/Indications"),
+                derivation: "structured",
             },
         )
         .await

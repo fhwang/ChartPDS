@@ -3,13 +3,17 @@
 //! Rust has no official Anthropic SDK, so this is a plain `reqwest` call to
 //! `POST /v1/messages` with a structured-output JSON schema
 //! (`output_config.format`), which guarantees the response text is valid
-//! JSON matching [`RawExtraction`]. The model id and prompt version are
-//! pinned here and recorded in every archived artifact.
+//! JSON matching [`RawExtraction`] (clinical-PDF ingest) or
+//! [`RawJournalExtraction`] (journal-entry ingest). The two prompts and
+//! schemas differ, but share the same model, retry, and transport
+//! machinery. The model id and prompt versions are pinned here and recorded
+//! in every archived artifact.
 
 use std::future::Future;
 
 use super::artifact::RawExtraction;
 use super::error::Error;
+use super::journal::RawJournalExtraction;
 
 /// Claude model used for extraction. Recorded in every artifact.
 pub const EXTRACTION_MODEL: &str = "claude-opus-4-8";
@@ -18,6 +22,11 @@ pub const EXTRACTION_MODEL: &str = "claude-opus-4-8";
 /// configuration). Bump when either changes in a way that affects output.
 /// v2: enabled adaptive thinking (v1 leaked reasoning into the JSON).
 pub const PROMPT_VERSION: u32 = 2;
+
+/// Version of the journal extraction request ([`JOURNAL_PROMPT`] plus
+/// request configuration). Bump when either changes in a way that affects
+/// output.
+pub const JOURNAL_PROMPT_VERSION: u32 = 1;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
@@ -53,6 +62,29 @@ section heading it appears under (e.g. \"Pre-Op Diagnosis/Indications\"), or nul
 Do not include codes that do not appear in the text. Copy quotes exactly — they are checked \
 mechanically against the document, and any quote that is not a verbatim substring is \
 discarded.";
+
+const JOURNAL_PROMPT: &str = "You are reading one personal health-journal entry, written by a \
+patient in casual, non-medical language. Map the complaints and symptoms the author describes \
+onto ICD-10-CM codes so the entry can be found and analyzed alongside clinical records. The \
+author is not a clinician: do not diagnose, and prefer coarse, common symptom/complaint codes \
+(R-codes; site-specific pain codes such as M25.512 Pain in left shoulder) over specific disease \
+codes. Use the same code for the same complaint every time.\n\
+\n\
+Extract:\n\
+1. entry_date: the calendar date the entry is about, formatted YYYY-MM-DD, ONLY if a date \
+appears in the entry text itself, with entry_date_quote set to an exact verbatim span \
+containing that date. Otherwise null for both.\n\
+2. title: a short human-readable label, e.g. \"Journal — left shoulder ache, poor sleep\".\n\
+3. codings: one per distinct symptom or complaint the author describes as their own, current \
+experience. For each: code = a valid ICD-10-CM code for the complaint; display = the standard \
+ICD-10-CM description; quote = an exact verbatim span from the entry describing the complaint; \
+severity = a number ONLY when the author explicitly writes a numeric rating (e.g. \"pain was a \
+6 today\" -> 6) and that number appears inside the quote, otherwise null. Never turn words like \
+\"awful\" into a number.\n\
+\n\
+Do not code things the author denies, describes in someone else, or mentions only as history. \
+Copy quotes exactly — they are checked mechanically against the entry, and any quote that is \
+not a verbatim substring is discarded.";
 
 /// Anything that can turn document text into a [`RawExtraction`].
 ///
@@ -164,8 +196,57 @@ fn build_request_body(text: &str) -> serde_json::Value {
     })
 }
 
-/// Parse the Messages API response body into a [`RawExtraction`].
-fn parse_response(body: &serde_json::Value) -> Result<RawExtraction, Error> {
+/// The JSON schema for journal extraction (structured outputs).
+fn journal_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "entry_date": {"type": ["string", "null"]},
+            "entry_date_quote": {"type": ["string", "null"]},
+            "title": {"type": ["string", "null"]},
+            "codings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                        "display": {"type": "string"},
+                        "quote": {"type": "string"},
+                        "severity": {"type": ["number", "null"]}
+                    },
+                    "required": ["code", "display", "quote", "severity"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["entry_date", "entry_date_quote", "title", "codings"],
+        "additionalProperties": false
+    })
+}
+
+/// Build the `POST /v1/messages` request body for one journal entry.
+/// `feedback` carries rejection reasons from a prior attempt (e.g. invalid
+/// codes) so the model can correct itself on the single semantic retry.
+fn build_journal_request_body(text: &str, feedback: Option<&str>) -> serde_json::Value {
+    let mut prompt = JOURNAL_PROMPT.to_owned();
+    if let Some(fb) = feedback {
+        prompt.push_str("\n\nA previous attempt was rejected for these reasons — correct them:\n");
+        prompt.push_str(fb);
+    }
+    serde_json::json!({
+        "model": EXTRACTION_MODEL,
+        "max_tokens": 16000,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"format": {"type": "json_schema", "schema": journal_output_schema()}},
+        "messages": [{
+            "role": "user",
+            "content": format!("{prompt}\n\n<entry>\n{text}\n</entry>"),
+        }],
+    })
+}
+
+/// Parse the Messages API response body into the expected structured type.
+fn parse_response_as<T: serde::de::DeserializeOwned>(body: &serde_json::Value) -> Result<T, Error> {
     if let Some(stop) = body.get("stop_reason").and_then(|v| v.as_str()) {
         if stop == "refusal" {
             return Err(Error::Api {
@@ -192,16 +273,21 @@ fn parse_response(body: &serde_json::Value) -> Result<RawExtraction, Error> {
             reason: "no text content block in response".to_owned(),
         })?;
     serde_json::from_str(text).map_err(|err| Error::InvalidResponse {
-        reason: format!("structured output did not parse as RawExtraction: {err}"),
+        reason: format!("structured output did not parse as expected type: {err}"),
     })
 }
 
+/// Parse the Messages API response body into a [`RawExtraction`].
+fn parse_response(body: &serde_json::Value) -> Result<RawExtraction, Error> {
+    parse_response_as(body)
+}
+
 impl ClaudeExtractor {
-    /// One `POST /v1/messages` attempt. On failure the `bool` says whether
-    /// the failure is transient (connection error, HTTP 429/5xx) and worth
-    /// retrying; deterministic failures (auth, refusal, malformed response)
-    /// are not.
-    async fn attempt(&self, body: &serde_json::Value) -> Result<RawExtraction, (Error, bool)> {
+    /// One `POST /v1/messages` attempt, returning the raw response JSON. On
+    /// failure the `bool` says whether the failure is transient (connection
+    /// error, HTTP 429/5xx) and worth retrying; deterministic failures
+    /// (auth, refusal, malformed response) are not.
+    async fn attempt(&self, body: &serde_json::Value) -> Result<serde_json::Value, (Error, bool)> {
         let response = self
             .http
             .post(messages_url(&self.base_url))
@@ -242,17 +328,19 @@ impl ClaudeExtractor {
                 false,
             )
         })?;
-        parse_response(&body).map_err(|err| (err, false))
+        Ok(body)
     }
-}
 
-impl LlmExtractor for ClaudeExtractor {
-    async fn extract(&self, text: &str) -> Result<RawExtraction, Error> {
-        let body = build_request_body(text);
+    /// Run [`Self::attempt`] with the bounded transient-retry loop, returning
+    /// the raw response JSON of whichever attempt succeeded.
+    async fn request_with_retries(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
         let mut attempt = 1u32;
         loop {
-            match self.attempt(&body).await {
-                Ok(raw) => return Ok(raw),
+            match self.attempt(body).await {
+                Ok(v) => return Ok(v),
                 Err((error, transient)) => {
                     if !transient || attempt >= MAX_ATTEMPTS {
                         return Err(error);
@@ -263,6 +351,41 @@ impl LlmExtractor for ClaudeExtractor {
                 }
             }
         }
+    }
+}
+
+impl LlmExtractor for ClaudeExtractor {
+    async fn extract(&self, text: &str) -> Result<RawExtraction, Error> {
+        let body = build_request_body(text);
+        let v = self.request_with_retries(&body).await?;
+        parse_response(&v)
+    }
+}
+
+/// Anything that can turn one journal entry into a [`RawJournalExtraction`].
+///
+/// Separate from [`LlmExtractor`] because the journal prompt, output schema,
+/// and feedback-retry contract differ; ingestion tests use canned impls.
+pub trait JournalExtractor {
+    /// Extract structured claims from one journal entry. `feedback`, when
+    /// present, carries rejection reasons from a prior attempt (invalid
+    /// codes) for a single corrective retry.
+    fn extract_journal(
+        &self,
+        text: &str,
+        feedback: Option<&str>,
+    ) -> impl Future<Output = Result<RawJournalExtraction, Error>> + Send;
+}
+
+impl JournalExtractor for ClaudeExtractor {
+    async fn extract_journal(
+        &self,
+        text: &str,
+        feedback: Option<&str>,
+    ) -> Result<RawJournalExtraction, Error> {
+        let body = build_journal_request_body(text, feedback);
+        let v = self.request_with_retries(&body).await?;
+        parse_response_as(&v)
     }
 }
 
@@ -475,5 +598,55 @@ mod tests {
         });
         let err = parse_response(&body).expect_err("should fail");
         assert!(matches!(err, Error::InvalidResponse { .. }));
+    }
+
+    #[test]
+    fn journal_request_body_pins_model_schema_and_embeds_entry() {
+        let body = build_journal_request_body("SAMPLE JOURNAL ENTRY", None);
+        assert_eq!(body["model"], EXTRACTION_MODEL);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        let content = body["messages"][0]["content"].as_str().expect("content");
+        assert!(content.contains("SAMPLE JOURNAL ENTRY"));
+        assert!(content.contains("ICD-10-CM"));
+        assert!(content.contains("severity"));
+        assert!(
+            !content.contains("invalid ICD-10-CM codes"),
+            "no feedback block"
+        );
+        // Schema must include the journal-only fields.
+        let schema = &body["output_config"]["format"]["schema"];
+        assert!(schema["properties"]["entry_date"].is_object());
+        assert!(schema["properties"]["codings"]["items"]["properties"]["severity"].is_object());
+    }
+
+    #[test]
+    fn journal_feedback_is_appended_to_the_prompt() {
+        let body =
+            build_journal_request_body("ENTRY", Some("M25.5129 is not a valid ICD-10-CM code"));
+        let content = body["messages"][0]["content"].as_str().expect("content");
+        assert!(content.contains("M25.5129 is not a valid ICD-10-CM code"));
+    }
+
+    #[tokio::test]
+    async fn extract_journal_parses_a_successful_response() {
+        let (base_url, _hits) = scripted_server(vec![(
+            200,
+            serde_json::json!({
+                "stop_reason": "end_turn",
+                "content": [{
+                    "type": "text",
+                    "text": r#"{"entry_date":null,"entry_date_quote":null,"title":"Journal","codings":[{"code":"M25.512","display":"Pain in left shoulder","quote":"shoulder aching","severity":6}]}"#
+                }]
+            })
+            .to_string(),
+        )]);
+        let raw = fast_retry_extractor(base_url)
+            .extract_journal("shoulder aching", None)
+            .await
+            .expect("extract");
+        assert_eq!(raw.codings.len(), 1);
+        assert_eq!(raw.codings[0].code, "M25.512");
+        assert_eq!(raw.codings[0].severity, Some(6.0));
     }
 }

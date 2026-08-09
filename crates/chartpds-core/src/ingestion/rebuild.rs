@@ -14,6 +14,7 @@ use crate::index;
 use crate::ingestion::{ingest, Error, Result};
 use crate::sources;
 
+use super::journal;
 use super::narrative;
 
 /// Summary of a rebuild-index operation, broken down by source.
@@ -34,19 +35,25 @@ pub struct RebuildResult {
     pub narratives_ingested: u64,
     /// Frozen extraction artifacts applied to their narrative documents.
     pub extractions_applied: u64,
+    /// Journal entries replayed (text re-indexed deterministically).
+    pub journals_ingested: u64,
+    /// Frozen journal extraction artifacts applied to their entries.
+    pub journal_extractions_applied: u64,
 }
 
 /// Drop the index and rebuild it from the archive and the derived store,
 /// replaying every source.
 ///
 /// Each archive blob is routed by its sidecar [`Manifest`] `type`: CCDA
-/// documents are re-ingested and Fitbit/Oura blobs are replayed by their
-/// adapters. Blobs with no manifest (legacy) fall back to a best-effort CCDA
-/// parse. Derived-store blobs are expected to be `narrative-extraction`
-/// artifacts; extraction artifacts found in the archive (a legacy layout
-/// predating the derived store) replay identically. Unknown types and
-/// malformed payloads are counted as skipped. The blob's `archived_at` is
-/// preserved (taken from the manifest), not rewritten to "now".
+/// documents are re-ingested, Fitbit/Oura blobs are replayed by their
+/// adapters, narrative PDFs and journal entries are text-replayed. Blobs
+/// with no manifest (legacy) fall back to a best-effort CCDA parse.
+/// Derived-store blobs are expected to be `narrative-extraction` or
+/// `journal-extraction` artifacts; extraction artifacts found in the
+/// archive (a legacy layout predating the derived store) replay
+/// identically. Unknown types and malformed payloads are counted as
+/// skipped. The blob's `archived_at` is preserved (taken from the
+/// manifest), not rewritten to "now".
 ///
 /// # Errors
 ///
@@ -78,19 +85,23 @@ pub async fn rebuild_index(
         tally.record(replay_derived_blob(derived, key, &content).await?);
     }
 
-    // 4. Phase two: apply extraction artifacts, now that every narrative
-    //    document exists.
+    // 4. Phase two: apply extraction artifacts, now that every narrative and
+    //    journal document exists.
     let (extractions_applied, artifact_skips) =
         apply_newest_extraction_artifacts(pool, tally.extraction_artifacts).await?;
+    let (journal_extractions_applied, journal_artifact_skips) =
+        apply_newest_journal_artifacts(pool, tally.journal_artifacts).await?;
 
     Ok(RebuildResult {
         blobs_found,
         ccda_ingested: tally.ccda_ingested,
         fitbit_ingested: tally.fitbit_ingested,
         oura_ingested: tally.oura_ingested,
-        blobs_skipped: tally.blobs_skipped + artifact_skips,
+        blobs_skipped: tally.blobs_skipped + artifact_skips + journal_artifact_skips,
         narratives_ingested: tally.narratives_ingested,
         extractions_applied,
+        journals_ingested: tally.journals_ingested,
+        journal_extractions_applied,
     })
 }
 
@@ -104,6 +115,8 @@ struct ReplayTally {
     blobs_skipped: u64,
     narratives_ingested: u64,
     extraction_artifacts: Vec<(OffsetDateTime, ExtractionArtifact)>,
+    journals_ingested: u64,
+    journal_artifacts: Vec<(OffsetDateTime, crate::extraction::JournalExtractionArtifact)>,
 }
 
 impl ReplayTally {
@@ -115,6 +128,10 @@ impl ReplayTally {
             BlobOutcome::Narrative => self.narratives_ingested += 1,
             BlobOutcome::ExtractionArtifact(archived_at, artifact) => {
                 self.extraction_artifacts.push((archived_at, artifact));
+            }
+            BlobOutcome::Journal => self.journals_ingested += 1,
+            BlobOutcome::JournalArtifact(archived_at, artifact) => {
+                self.journal_artifacts.push((archived_at, artifact));
             }
             BlobOutcome::Skipped => self.blobs_skipped += 1,
         }
@@ -133,6 +150,10 @@ enum BlobOutcome {
     Narrative,
     /// A frozen extraction artifact, deferred to the phase-two apply pass.
     ExtractionArtifact(OffsetDateTime, ExtractionArtifact),
+    /// A journal entry's text was replayed.
+    Journal,
+    /// A frozen journal extraction artifact, deferred to phase two.
+    JournalArtifact(OffsetDateTime, crate::extraction::JournalExtractionArtifact),
     /// The blob was unreadable, unrecognized, or malformed.
     Skipped,
 }
@@ -204,6 +225,17 @@ async fn replay_blob(
         narrative::NARRATIVE_EXTRACTION_KIND => {
             Ok(parse_extraction_artifact(key, &content, &manifest))
         }
+        journal::JOURNAL_KIND => {
+            match journal::replay_journal(pool, key, &content, &manifest).await {
+                Ok(_) => Ok(BlobOutcome::Journal),
+                Err(Error::JournalNotUtf8) => {
+                    tracing::warn!(key = key.as_str(), "skipping non-utf8 journal blob");
+                    Ok(BlobOutcome::Skipped)
+                }
+                Err(err) => Err(err),
+            }
+        }
+        journal::JOURNAL_EXTRACTION_KIND => Ok(parse_journal_artifact(key, &content, &manifest)),
         other => {
             tracing::warn!(
                 key = key.as_str(),
@@ -216,9 +248,9 @@ async fn replay_blob(
 }
 
 /// Route one derived-store blob. The derived store holds machine-generated
-/// derivations only — currently just `narrative-extraction` artifacts — so
-/// anything else (including a manifest-less blob) is skipped, never
-/// type-sniffed as a source document.
+/// derivations only — currently `narrative-extraction` and
+/// `journal-extraction` artifacts — so anything else (including a
+/// manifest-less blob) is skipped, never type-sniffed as a source document.
 async fn replay_derived_blob(
     derived: &Archive,
     key: &BlobKey,
@@ -228,15 +260,19 @@ async fn replay_derived_blob(
         tracing::warn!(key = key.as_str(), "skipping manifest-less derived blob");
         return Ok(BlobOutcome::Skipped);
     };
-    if manifest.kind == narrative::NARRATIVE_EXTRACTION_KIND {
-        Ok(parse_extraction_artifact(key, content, &manifest))
-    } else {
-        tracing::warn!(
-            key = key.as_str(),
-            kind = manifest.kind.as_str(),
-            "skipping unknown derived blob type"
-        );
-        Ok(BlobOutcome::Skipped)
+    match manifest.kind.as_str() {
+        narrative::NARRATIVE_EXTRACTION_KIND => {
+            Ok(parse_extraction_artifact(key, content, &manifest))
+        }
+        journal::JOURNAL_EXTRACTION_KIND => Ok(parse_journal_artifact(key, content, &manifest)),
+        _ => {
+            tracing::warn!(
+                key = key.as_str(),
+                kind = manifest.kind.as_str(),
+                "skipping unknown derived blob type"
+            );
+            Ok(BlobOutcome::Skipped)
+        }
     }
 }
 
@@ -251,6 +287,22 @@ fn parse_extraction_artifact(
         Ok(artifact) => BlobOutcome::ExtractionArtifact(manifest.archived_at, artifact),
         Err(err) => {
             tracing::warn!(key = key.as_str(), %err, "skipping malformed extraction artifact");
+            BlobOutcome::Skipped
+        }
+    }
+}
+
+/// Parse a `journal-extraction` blob into its deferred phase-two outcome;
+/// malformed JSON is skipped, not fatal.
+fn parse_journal_artifact(
+    key: &BlobKey,
+    content: &bytes::Bytes,
+    manifest: &Manifest,
+) -> BlobOutcome {
+    match serde_json::from_slice::<crate::extraction::JournalExtractionArtifact>(content) {
+        Ok(artifact) => BlobOutcome::JournalArtifact(manifest.archived_at, artifact),
+        Err(err) => {
+            tracing::warn!(key = key.as_str(), %err, "skipping malformed journal artifact");
             BlobOutcome::Skipped
         }
     }
@@ -292,6 +344,44 @@ async fn apply_newest_extraction_artifacts(
         }
     }
     Ok((extractions_applied, blobs_skipped))
+}
+
+/// Apply the newest journal artifact per referenced entry (a corrective
+/// re-ingest can leave multiple artifacts pointing at the same blob).
+/// Returns `(journal_extractions_applied, blobs_skipped)`.
+async fn apply_newest_journal_artifacts(
+    pool: &SqlitePool,
+    artifacts: Vec<(OffsetDateTime, crate::extraction::JournalExtractionArtifact)>,
+) -> Result<(u64, u64)> {
+    let mut newest: std::collections::HashMap<
+        String,
+        (OffsetDateTime, crate::extraction::JournalExtractionArtifact),
+    > = std::collections::HashMap::new();
+    for (at, artifact) in artifacts {
+        match newest.get(&artifact.document) {
+            Some((existing_at, _)) if *existing_at >= at => {}
+            _ => {
+                newest.insert(artifact.document.clone(), (at, artifact));
+            }
+        }
+    }
+    let mut applied = 0u64;
+    let mut skipped = 0u64;
+    for (_at, artifact) in newest.into_values() {
+        let Ok(key) = BlobKey::from_hex_str(&artifact.document) else {
+            tracing::warn!(document = %artifact.document, "journal artifact references invalid blob key");
+            skipped += 1;
+            continue;
+        };
+        if let Some(doc) = index::fetch_source_document_by_archive_key(pool, &key).await? {
+            journal::apply_journal_extraction(pool, doc.id, &artifact).await?;
+            applied += 1;
+        } else {
+            tracing::warn!(document = %artifact.document, "journal artifact references missing document");
+            skipped += 1;
+        }
+    }
+    Ok((applied, skipped))
 }
 
 /// Re-ingest a CCDA blob, preserving its manifest provenance (`source`,
@@ -733,6 +823,85 @@ mod tests {
             "artifact in the archive must still replay"
         );
         assert_eq!(result.blobs_skipped, 0);
+    }
+
+    /// Canned journal extractor for rebuild tests: no network.
+    struct MockJournalExtractor;
+    impl crate::extraction::JournalExtractor for MockJournalExtractor {
+        async fn extract_journal(
+            &self,
+            _text: &str,
+            _feedback: Option<&str>,
+        ) -> std::result::Result<crate::extraction::RawJournalExtraction, crate::extraction::Error>
+        {
+            use crate::extraction::{RawJournalCoding, RawJournalExtraction};
+            Ok(RawJournalExtraction {
+                entry_date: None,
+                entry_date_quote: None,
+                title: Some("Journal — shoulder ache".to_owned()),
+                codings: vec![RawJournalCoding {
+                    code: "M25.512".to_owned(),
+                    display: "Pain in left shoulder".to_owned(),
+                    quote: "Left shoulder aching again after climbing.".to_owned(),
+                    severity: None,
+                }],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_replays_journal_and_applies_artifact_without_llm() {
+        use crate::ingestion::{ingest_journal, NarrativeIngestParams, JOURNAL_KIND};
+
+        let (pool, archive, derived) = fresh_pool_and_stores().await;
+        ingest_journal(
+            &archive,
+            &derived,
+            &pool,
+            bytes::Bytes::from_static(
+                b"# Jul 26, 2026\n\nLeft shoulder aching again after climbing.\n",
+            ),
+            NarrativeIngestParams {
+                source: "journal",
+                original_filename: Some("2026-07-26.md"),
+                archived_at: time::macros::datetime!(2026-07-26 21:00:00 UTC),
+            },
+            Some(&MockJournalExtractor),
+        )
+        .await
+        .expect("live ingest");
+
+        // Rebuild must reproduce everything from the two stores alone.
+        let result = rebuild_index(&archive, &derived, &pool)
+            .await
+            .expect("rebuild");
+        assert_eq!(result.blobs_found, 2);
+        assert_eq!(result.journals_ingested, 1);
+        assert_eq!(result.journal_extractions_applied, 1);
+        assert_eq!(result.blobs_skipped, 0);
+
+        let doc_row: (i64, Option<String>) =
+            sqlx::query_as("SELECT id, document_date FROM source_documents WHERE kind = ?")
+                .bind(JOURNAL_KIND)
+                .fetch_one(&pool)
+                .await
+                .expect("doc row");
+        assert_eq!(doc_row.1.as_deref(), Some("2026-07-26"));
+
+        let obs = crate::index::list_observations_by_source_document(&pool, doc_row.0)
+            .await
+            .expect("observations");
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].coding_code, "M25.512");
+        assert_eq!(obs[0].derivation, "inferred");
+
+        let fts: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM narrative_texts_fts WHERE narrative_texts_fts MATCH 'climbing'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fts");
+        assert_eq!(fts.0, 1);
     }
 
     #[tokio::test]

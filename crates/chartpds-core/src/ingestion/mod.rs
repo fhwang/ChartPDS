@@ -1,8 +1,12 @@
 //! CCDA parsing + observation extraction + archive-to-index pipeline, plus
-//! narrative-PDF ingestion (archive → text → verified LLM extraction).
+//! narrative-PDF ingestion (archive → text → verified LLM extraction) and
+//! journal-entry ingestion (free colloquial `.md` text → deterministic
+//! entry-date resolution → verified LLM inference of ICD-10-CM codings,
+//! indexed as `derivation = 'inferred'` observations rather than problems).
 //!
 //! Public surface is the [`ingest`] function (the CCDA orchestrator),
-//! [`ingest_narrative_pdf`] (the narrative-PDF orchestrator), and [`Error`].
+//! [`ingest_narrative_pdf`] (the narrative-PDF orchestrator),
+//! [`ingest_journal`] (the journal-entry orchestrator), and [`Error`].
 //! Everything else is internal — the parser, self-check, and per-section
 //! extractors live in [`ccda`](self::ccda).
 //!
@@ -17,11 +21,13 @@
 mod ccda;
 mod error;
 mod ingest;
+mod journal;
 mod narrative;
 mod rebuild;
 
 pub use error::{Error, Result};
 pub use ingest::ingest;
+pub use journal::{ingest_journal, JournalIngestOutcome, JOURNAL_EXTRACTION_KIND, JOURNAL_KIND};
 pub use narrative::{
     ingest_narrative_pdf, NarrativeIngestOutcome, NarrativeIngestParams, NARRATIVE_EXTRACTION_KIND,
     NARRATIVE_PDF_KIND,

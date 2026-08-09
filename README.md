@@ -60,8 +60,9 @@ npx @modelcontextprotocol/inspector \
 
 The tool surface, grouped:
 
-- **Ingest & maintenance** — `record_ingest` (CCDA XML or narrative
-  clinical PDF), `index_rebuild` (offline replay of the archive)
+- **Ingest & maintenance** — `record_ingest` (CCDA XML, narrative
+  clinical PDF, or a personal health-journal entry), `index_rebuild`
+  (offline replay of the archive)
 - **Observations & analytics** — `observation_codings`,
   `coding_definitions`, `observation_latest`, `observation_history`,
   `observation_stats`, `observation_table`, `observation_relationship`

@@ -203,6 +203,7 @@ mod tests {
                     status,
                     onset_date: Some("2020-03-15"),
                     section_label: None,
+                    derivation: "structured",
                 },
             )
             .await
@@ -260,6 +261,7 @@ mod tests {
                 status: "active",
                 onset_date: Some("2020-01-01"),
                 section_label: None,
+                derivation: "structured",
             },
         )
         .await
@@ -274,6 +276,7 @@ mod tests {
                 status: "resolved",
                 onset_date: None,
                 section_label: None,
+                derivation: "structured",
             },
         )
         .await
@@ -307,6 +310,7 @@ mod tests {
                     status: "active",
                     onset_date: Some(onset),
                     section_label: None,
+                    derivation: "structured",
                 },
             )
             .await
@@ -342,6 +346,7 @@ mod tests {
                     status: "unknown",
                     onset_date: Some("2026-04-21"),
                     section_label: Some(label),
+                    derivation: "structured",
                 },
             )
             .await

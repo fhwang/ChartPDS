@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT id AS \"id!: i64\",\n                   source_document_id AS \"source_document_id!: i64\",\n                   coding_system, coding_code, coding_display,\n                   effective_start AS \"effective_start: OffsetDateTime\",\n                   effective_end AS \"effective_end?: OffsetDateTime\",\n                   value_quantity, value_string, value_unit\n            FROM observations\n            WHERE coding_system = ?\n              AND coding_code = ?\n              AND (? IS NULL OR effective_start >= ?)\n              AND (? IS NULL OR effective_start <  ?)\n            ORDER BY effective_start\n            ",
+  "query": "\n        SELECT id AS \"id!: i64\",\n               source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               effective_start AS \"effective_start: OffsetDateTime\",\n               effective_end AS \"effective_end?: OffsetDateTime\",\n               value_quantity, value_string, value_unit, derivation\n        FROM observations\n        WHERE coding_system = ? AND coding_code = ?\n        ORDER BY effective_start DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -52,10 +52,15 @@
         "name": "value_unit",
         "ordinal": 9,
         "type_info": "Text"
+      },
+      {
+        "name": "derivation",
+        "ordinal": 10,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 6
+      "Right": 2
     },
     "nullable": [
       true,
@@ -67,8 +72,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "6ff400194a2d2b042ae7002ae9435e4dbe842fe919e96f76e67420f576e4608c"
+  "hash": "459025d4dc16791fe29df895aee07ba2f1b5859bc1ca750729c61b78313e47ba"
 }

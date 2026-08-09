@@ -46,7 +46,7 @@ pub async fn observation_history(
                    coding_system, coding_code, coding_display,
                    effective_start AS "effective_start: OffsetDateTime",
                    effective_end AS "effective_end?: OffsetDateTime",
-                   value_quantity, value_string, value_unit
+                   value_quantity, value_string, value_unit, derivation
             FROM observations
             WHERE coding_system = ?
               AND coding_code = ?
@@ -75,6 +75,7 @@ pub async fn observation_history(
             value_quantity: r.value_quantity,
             value_string: r.value_string,
             value_unit: r.value_unit,
+            derivation: r.derivation,
         }));
     }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id AS \"id!: i64\", source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               status, onset_date, section_label\n        FROM problems\n        WHERE source_document_id = ?\n        ORDER BY onset_date\n        ",
+  "query": "\n        SELECT id AS \"id!: i64\", source_document_id AS \"source_document_id!: i64\",\n               coding_system, coding_code, coding_display,\n               status, onset_date, section_label, derivation\n        FROM problems\n        WHERE source_document_id = ?\n        ORDER BY onset_date\n        ",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,11 @@
         "name": "section_label",
         "ordinal": 7,
         "type_info": "Text"
+      },
+      {
+        "name": "derivation",
+        "ordinal": 8,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -55,8 +60,9 @@
       true,
       false,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "e403bfaadca5e1c4a5726919ea242819d1fec01ec1c1d59855744e442f051c5a"
+  "hash": "612a6baa65bfa690d65a04ea9e0f38a134a02db3c7067ffcca471e9c2fc124ca"
 }

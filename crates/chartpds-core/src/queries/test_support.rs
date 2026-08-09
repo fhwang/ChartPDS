@@ -73,6 +73,7 @@ pub(crate) async fn seed_observations(observations: &[ObsSpec]) -> (SqlitePool, 
                 value_quantity: spec.value_quantity,
                 value_string: None,
                 value_unit: spec.value_unit,
+                derivation: "structured",
             },
         )
         .await
@@ -140,6 +141,7 @@ pub(crate) async fn seed_interval_observations(
                 value_quantity: Some(spec.value_quantity),
                 value_string: None,
                 value_unit: None,
+                derivation: "structured",
             },
         )
         .await
