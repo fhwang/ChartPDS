@@ -18,6 +18,10 @@ pub struct NarrativeSearchHit {
     pub document_date: Option<String>,
     /// Matching excerpt (FTS snippet) or the document's opening text.
     pub snippet: String,
+    /// Coded claims (problems + observations) attached to this document.
+    /// `0` on a journal entry means it produced no structured data and is
+    /// reachable only via full-text search.
+    pub codings_count: i64,
 }
 
 /// Search narrative texts, or list them newest-first when `query` is `None`.
@@ -35,13 +39,15 @@ pub async fn search_narratives(
     if let Some(q) = query {
         // runtime query: sqlx cannot prepare against the FTS5 virtual table
         let rows =
-            sqlx::query_as::<_, (i64, Option<String>, String, String, Option<String>, String)>(
+            sqlx::query_as::<_, (i64, Option<String>, String, String, Option<String>, String, i64)>(
                 r"
             SELECT nt.source_document_id,
                    nt.title,
                    sd.kind, sd.source,
                    sd.document_date,
-                   snippet(narrative_texts_fts, 0, '[', ']', ' … ', 16)
+                   snippet(narrative_texts_fts, 0, '[', ']', ' … ', 16),
+                   (SELECT COUNT(*) FROM problems p WHERE p.source_document_id = nt.source_document_id)
+                     + (SELECT COUNT(*) FROM observations o WHERE o.source_document_id = nt.source_document_id)
             FROM narrative_texts_fts
             JOIN narrative_texts nt ON nt.source_document_id = narrative_texts_fts.rowid
             JOIN source_documents sd ON sd.id = nt.source_document_id
@@ -57,7 +63,15 @@ pub async fn search_narratives(
         Ok(rows
             .into_iter()
             .map(
-                |(source_document_id, title, kind, source, document_date, snippet)| {
+                |(
+                    source_document_id,
+                    title,
+                    kind,
+                    source,
+                    document_date,
+                    snippet,
+                    codings_count,
+                )| {
                     NarrativeSearchHit {
                         source_document_id,
                         title,
@@ -65,6 +79,7 @@ pub async fn search_narratives(
                         source,
                         document_date,
                         snippet,
+                        codings_count,
                     }
                 },
             )
@@ -76,7 +91,9 @@ pub async fn search_narratives(
                    nt.title,
                    sd.kind AS "kind!", sd.source AS "source!",
                    sd.document_date,
-                   substr(nt.text, 1, 200) AS "snippet!: String"
+                   substr(nt.text, 1, 200) AS "snippet!: String",
+                   (SELECT COUNT(*) FROM problems p WHERE p.source_document_id = nt.source_document_id)
+                     + (SELECT COUNT(*) FROM observations o WHERE o.source_document_id = nt.source_document_id) AS "codings_count!: i64"
             FROM narrative_texts nt
             JOIN source_documents sd ON sd.id = nt.source_document_id
             ORDER BY sd.document_date DESC, sd.id DESC
@@ -95,6 +112,7 @@ pub async fn search_narratives(
                 source: r.source,
                 document_date: r.document_date,
                 snippet: r.snippet,
+                codings_count: r.codings_count,
             })
             .collect())
     }
@@ -194,5 +212,51 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].source_document_id, newer);
         assert_eq!(hits[1].snippet, "older document");
+    }
+
+    #[tokio::test]
+    async fn catalog_reports_codings_count_including_zero() {
+        let pool = pool().await;
+        let coded = narrative(
+            &pool,
+            "5555555555555555555555555555555555555555555555555555555555555555",
+            Some("2026-07-26"),
+            "left shoulder aching after climbing",
+        )
+        .await;
+        let uncoded = narrative(
+            &pool,
+            "6666666666666666666666666666666666666666666666666666666666666666",
+            Some("2026-07-27"),
+            "felt great, long run",
+        )
+        .await;
+        crate::index::insert_observation(
+            &pool,
+            crate::index::InsertObservationParams {
+                source_document_id: coded,
+                coding_system: "http://hl7.org/fhir/sid/icd-10-cm",
+                coding_code: "M25.512",
+                coding_display: Some("Pain in left shoulder"),
+                effective_start: time::macros::datetime!(2026-07-26 00:00:00 UTC),
+                effective_end: None,
+                value_quantity: None,
+                value_string: None,
+                value_unit: None,
+                derivation: "inferred",
+            },
+        )
+        .await
+        .expect("insert obs");
+
+        let hits = search_narratives(&pool, None, 10).await.expect("list");
+        let count_for = |id: i64| {
+            hits.iter()
+                .find(|h| h.source_document_id == id)
+                .expect("hit")
+                .codings_count
+        };
+        assert_eq!(count_for(coded), 1);
+        assert_eq!(count_for(uncoded), 0, "zero-coding entries stay visible");
     }
 }

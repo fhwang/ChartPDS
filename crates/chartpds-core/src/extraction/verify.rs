@@ -3,8 +3,9 @@
 //! Pure functions, no async, no database, no network. An LLM claim only
 //! reaches the archived artifact if it is provable against the text: every
 //! quote must be a substring (whitespace-normalized — portal PDFs contain
-//! non-breaking spaces), a coding's code must appear inside its quote, and
-//! a claimed date must appear literally inside its quote.
+//! non-breaking spaces), a coding's code must appear inside its quote, be a
+//! real ICD-10-CM code per the vendored table, and a claimed date must
+//! appear literally inside its quote.
 
 use super::artifact::{ExtractedCoding, RawExtraction, ICD10_CM_SYSTEM};
 
@@ -31,7 +32,7 @@ pub(crate) fn normalize_ws(s: &str) -> String {
 /// True when `needle` occurs in `haystack` NOT flanked by an ASCII digit on
 /// either side — so a candidate date can't match inside a longer number
 /// (e.g. `1/15/2026` inside `11/15/2026`).
-fn contains_anchored(haystack: &str, needle: &str) -> bool {
+pub(super) fn contains_anchored(haystack: &str, needle: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(needle) {
         let abs = start + pos;
@@ -55,7 +56,7 @@ fn contains_anchored(haystack: &str, needle: &str) -> bool {
 }
 
 /// Render the plausible in-document spellings of an ISO date `YYYY-MM-DD`.
-fn date_candidates(iso: &str) -> Option<Vec<String>> {
+pub(super) fn date_candidates(iso: &str) -> Option<Vec<String>> {
     const MONTHS: [&str; 12] = [
         "January",
         "February",
@@ -114,6 +115,11 @@ pub fn verify_extraction(text: &str, raw: RawExtraction) -> VerifiedExtraction {
             rejected.push(format!(
                 "coding {}: code does not appear in its quote {:?}",
                 c.code, c.quote
+            ));
+        } else if !super::icd10::is_valid_icd10cm(&c.code) {
+            rejected.push(format!(
+                "coding {}: not a valid ICD-10-CM code (vendored FY2026 table)",
+                c.code
             ));
         } else {
             codings.push(ExtractedCoding {
@@ -278,5 +284,23 @@ mod tests {
         let v = verify_extraction(TEXT, raw(vec![coding("", "Abdominal")], None, None));
         assert!(v.codings.is_empty());
         assert_eq!(v.rejected.len(), 1);
+    }
+
+    #[test]
+    fn rejects_code_not_in_the_icd10cm_table_even_when_quoted() {
+        // A well-formed but nonexistent code, "present" verbatim in the text:
+        // the vocabulary table must still reject it.
+        let text = "Diagnosis: Something odd - Q99.9999";
+        let v = verify_extraction(
+            text,
+            raw(
+                vec![coding("Q99.9999", "Something odd - Q99.9999")],
+                None,
+                None,
+            ),
+        );
+        assert!(v.codings.is_empty());
+        assert_eq!(v.rejected.len(), 1);
+        assert!(v.rejected[0].contains("not a valid ICD-10-CM code"));
     }
 }

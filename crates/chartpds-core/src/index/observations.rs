@@ -26,6 +26,10 @@ pub struct Observation {
     pub value_string: Option<String>,
     /// Unit for `value_quantity` (e.g. `"kg"`, `"mmHg"`).
     pub value_unit: Option<String>,
+    /// How the coded claim was derived from its source document:
+    /// `"structured"` (structured field), `"verbatim"` (code present in the
+    /// grounding quote), or `"inferred"` (LLM mapped prose to the code).
+    pub derivation: String,
 }
 
 /// Parameters for [`insert`].
@@ -48,6 +52,8 @@ pub struct InsertParams<'a> {
     pub value_string: Option<&'a str>,
     /// Unit for `value_quantity`, if applicable.
     pub value_unit: Option<&'a str>,
+    /// Derivation class: `"structured"`, `"verbatim"`, or `"inferred"`.
+    pub derivation: &'a str,
 }
 
 /// Insert a new observation row.
@@ -62,9 +68,9 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         INSERT INTO observations (
             source_document_id, coding_system, coding_code, coding_display,
             effective_start, effective_end,
-            value_quantity, value_string, value_unit
+            value_quantity, value_string, value_unit, derivation
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
         params.source_document_id,
@@ -76,6 +82,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         params.value_quantity,
         params.value_string,
         params.value_unit,
+        params.derivation,
     )
     .fetch_one(pool)
     .await?;
@@ -97,7 +104,7 @@ pub async fn list_by_source_document(
                coding_system, coding_code, coding_display,
                effective_start AS "effective_start: OffsetDateTime",
                effective_end AS "effective_end?: OffsetDateTime",
-               value_quantity, value_string, value_unit
+               value_quantity, value_string, value_unit, derivation
         FROM observations
         WHERE source_document_id = ?
         ORDER BY effective_start
@@ -120,6 +127,7 @@ pub async fn list_by_source_document(
             value_quantity: r.value_quantity,
             value_string: r.value_string,
             value_unit: r.value_unit,
+            derivation: r.derivation,
         })
         .collect())
 }
@@ -175,6 +183,7 @@ mod tests {
                 value_quantity: Some(72.5),
                 value_string: None,
                 value_unit: Some("kg"),
+                derivation: "structured",
             },
         )
         .await
@@ -185,6 +194,7 @@ mod tests {
         assert_eq!(rows[0].coding_code, "29463-7");
         assert_eq!(rows[0].value_quantity, Some(72.5));
         assert_eq!(rows[0].value_unit.as_deref(), Some("kg"));
+        assert_eq!(rows[0].derivation, "structured");
     }
 
     #[tokio::test]
@@ -204,6 +214,7 @@ mod tests {
                 value_quantity: Some(175.0),
                 value_string: None,
                 value_unit: Some("cm"),
+                derivation: "structured",
             },
         )
         .await

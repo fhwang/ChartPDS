@@ -1140,6 +1140,7 @@ mod tests {
                 value_quantity: Some(400.0),
                 value_string: None,
                 value_unit: None,
+                derivation: "structured",
             },
         )
         .await

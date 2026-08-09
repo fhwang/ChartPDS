@@ -23,10 +23,10 @@ docs are reliable and must be kept current:
   patterns in `crates/chartpds-core/src/index/mod.rs`
 - Archive/manifest model: `archive/mod.rs` and `archive/manifest.rs`
 - Ingestion and the narrative/LLM pipeline: `ingestion/mod.rs`,
-  `ingestion/narrative.rs`, `extraction/` (CCDA parsing quirks are on the
-  extractors themselves, e.g. the LDL-C `nullFlavor` fallback on
-  `extract_pq_value` in `ingestion/ccda/results.rs` — do not "simplify"
-  documented fallbacks away)
+  `ingestion/narrative.rs`, `ingestion/journal.rs`, `extraction/`,
+  `extraction/journal.rs` (CCDA parsing quirks are on the extractors
+  themselves, e.g. the LDL-C `nullFlavor` fallback on `extract_pq_value` in
+  `ingestion/ccda/results.rs` — do not "simplify" documented fallbacks away)
 - Adapters (setup steps, encodings): `sources/fitbit/mod.rs`,
   `sources/oura/mod.rs`
 - Sync daemon and the fetch rule: `sync/mod.rs`, `sources/confidence.rs`

@@ -112,6 +112,7 @@ pub async fn ingest(
                 value_quantity: obs.value_quantity,
                 value_string: obs.value_string.as_deref(),
                 value_unit: obs.value_unit.as_deref(),
+                derivation: "structured",
             },
         )
         .await?;
@@ -128,6 +129,7 @@ pub async fn ingest(
                 status: &prob.status,
                 onset_date: prob.onset_date.as_deref(),
                 section_label: None,
+                derivation: "structured",
             },
         )
         .await?;

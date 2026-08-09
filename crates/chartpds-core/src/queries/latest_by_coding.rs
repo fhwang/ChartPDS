@@ -27,7 +27,7 @@ pub async fn latest_by_coding(
                coding_system, coding_code, coding_display,
                effective_start AS "effective_start: OffsetDateTime",
                effective_end AS "effective_end?: OffsetDateTime",
-               value_quantity, value_string, value_unit
+               value_quantity, value_string, value_unit, derivation
         FROM observations
         WHERE coding_system = ? AND coding_code = ?
         ORDER BY effective_start DESC
@@ -53,6 +53,7 @@ pub async fn latest_by_coding(
         value_quantity: r.value_quantity,
         value_string: r.value_string,
         value_unit: r.value_unit,
+        derivation: r.derivation,
     };
     let mut annotated = annotate_observations(pool, now, vec![observation]).await?;
     Ok(annotated.pop())

@@ -22,6 +22,10 @@ pub struct Problem {
     /// Verbatim section heading the coding appeared under in a narrative
     /// document (e.g. `"Pre-Op Diagnosis/Indications"`). `None` for CCDA rows.
     pub section_label: Option<String>,
+    /// How the coded claim was derived from its source document:
+    /// `"structured"` (structured field), `"verbatim"` (code present in the
+    /// grounding quote), or `"inferred"` (LLM mapped prose to the code).
+    pub derivation: String,
 }
 
 /// Parameters for [`insert`].
@@ -40,6 +44,8 @@ pub struct InsertParams<'a> {
     pub onset_date: Option<&'a str>,
     /// Verbatim narrative section heading, if any.
     pub section_label: Option<&'a str>,
+    /// Derivation class: `"structured"`, `"verbatim"`, or `"inferred"`.
+    pub derivation: &'a str,
 }
 
 /// Insert a new problem row.
@@ -53,9 +59,9 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         r#"
         INSERT INTO problems (
             source_document_id, coding_system, coding_code, coding_display,
-            status, onset_date, section_label
+            status, onset_date, section_label, derivation
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id AS "id!: i64"
         "#,
         params.source_document_id,
@@ -65,6 +71,7 @@ pub async fn insert(pool: &SqlitePool, params: InsertParams<'_>) -> Result<i64, 
         params.status,
         params.onset_date,
         params.section_label,
+        params.derivation,
     )
     .fetch_one(pool)
     .await?;
@@ -84,7 +91,7 @@ pub async fn list_by_source_document(
         r#"
         SELECT id AS "id!: i64", source_document_id AS "source_document_id!: i64",
                coding_system, coding_code, coding_display,
-               status, onset_date, section_label
+               status, onset_date, section_label, derivation
         FROM problems
         WHERE source_document_id = ?
         ORDER BY onset_date
@@ -105,6 +112,7 @@ pub async fn list_by_source_document(
             status: r.status,
             onset_date: r.onset_date,
             section_label: r.section_label,
+            derivation: r.derivation,
         })
         .collect())
 }
@@ -157,6 +165,7 @@ mod tests {
                 status: "active",
                 onset_date: Some("2020-03-15"),
                 section_label: None,
+                derivation: "structured",
             },
         )
         .await
@@ -187,6 +196,7 @@ mod tests {
                 status: "unknown",
                 onset_date: Some("2026-04-21"),
                 section_label: Some("Pre-Op Diagnosis/Indications"),
+                derivation: "structured",
             },
         )
         .await

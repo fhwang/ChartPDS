@@ -136,6 +136,7 @@ async fn index_sleep_session(
                 value_quantity: Some(nightly.minutes),
                 value_string: None,
                 value_unit: Some("min"),
+                derivation: "structured",
             },
         )
         .await?;
@@ -154,6 +155,7 @@ async fn index_sleep_session(
                 value_quantity: Some(waso.minutes),
                 value_string: None,
                 value_unit: Some("min"),
+                derivation: "structured",
             },
         )
         .await?;
@@ -203,6 +205,7 @@ async fn insert_sleep_observation(
             value_quantity: Some(stage_value),
             value_string: Some(&stage_display),
             value_unit: None,
+            derivation: "structured",
         },
     )
     .await?;

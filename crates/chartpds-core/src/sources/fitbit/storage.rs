@@ -163,6 +163,7 @@ async fn index_intraday_day(
                 value_quantity: Some(obs.beats_per_minute),
                 value_string: None,
                 value_unit: Some("/min"),
+                derivation: "structured",
             },
         )
         .await?;

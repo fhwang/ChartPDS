@@ -56,9 +56,10 @@ pub(crate) struct RecordIngestArgs {
     /// The full CCDA XML content as a string (for small inline payloads).
     /// Provide either `file_path` or `content`, not both. Not usable for
     /// `kind="clinical-pdf"`: binary PDF bytes cannot be passed through this
-    /// string parameter — use `file_path` instead.
+    /// string parameter — use `file_path` instead. `kind="journal"` text is
+    /// plain UTF-8 (unlike PDFs) and MAY be passed inline via `content`.
     pub(crate) content: Option<String>,
-    /// Document kind: "ccda" or "clinical-pdf".
+    /// Document kind: "ccda", "clinical-pdf", or "journal".
     pub(crate) kind: String,
     /// Source identifier (e.g. `"manual-upload"`, `"fitbit"`).
     pub(crate) source: String,
@@ -639,7 +640,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Ingest a medical record document. kind=\"ccda\": CCDA XML (observations, problems, medications). kind=\"clinical-pdf\": a narrative clinical PDF (pathology/imaging report, visit note) — archives the PDF, indexes its text for narrative_search, and extracts explicitly-quoted ICD-10 codes into problems via a one-time verified LLM pass. LLM extraction is required: a missing ANTHROPIC_API_KEY or an LLM outage (after brief in-band retries) fails the ingest without persisting anything — fix the configuration or wait out the outage, then re-run. kind=\"clinical-pdf\" requires file_path (binary PDF bytes cannot be passed via the content string parameter). Returns what was extracted, verified, and dropped."
+        description = "Ingest a medical record document. kind=\"ccda\": CCDA XML (observations, problems, medications). kind=\"clinical-pdf\": a narrative clinical PDF (pathology/imaging report, visit note) — archives the PDF, indexes its text for narrative_search, and extracts explicitly-quoted ICD-10 codes into problems via a one-time verified LLM pass. LLM extraction is required: a missing ANTHROPIC_API_KEY or an LLM outage (after brief in-band retries) fails the ingest without persisting anything — fix the configuration or wait out the outage, then re-run. kind=\"clinical-pdf\" requires file_path (binary PDF bytes cannot be passed via the content string parameter). Returns what was extracted, verified, and dropped. kind=\"journal\": one personal health-journal entry (markdown/plain text, UTF-8, passable inline via content) written in free colloquial language — archives the text, indexes it for narrative_search, and maps described symptoms/complaints to coarse ICD-10-CM codes as observations rows with derivation \"inferred\" (severity captured as value_quantity only when the author stated a number; an entry with nothing to code succeeds with zero codings). One entry per file; the entry date comes from a YYYY-MM-DD in the filename or a dated markdown header (a year must appear somewhere), falling back to a verified date in the text. Returns the verified codings WITH their grounding quotes — echo each code+quote pair back to the user so the author can catch mis-mappings, since these codes are LLM-inferred, not quoted from a clinician."
     )]
     async fn record_ingest(
         &self,
@@ -715,8 +716,33 @@ impl ChartPdsServer {
                     .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
+            "journal" => {
+                let extractor =
+                    chartpds_core::extraction::ClaudeExtractor::from_env(self.http_client.clone());
+                let outcome = chartpds_core::ingestion::ingest_journal(
+                    &self.archive,
+                    &self.derived,
+                    &self.pool,
+                    content,
+                    NarrativeIngestParams {
+                        source: &args.source,
+                        original_filename: original_filename.as_deref(),
+                        archived_at: time::OffsetDateTime::now_utc(),
+                    },
+                    extractor.as_ref(),
+                )
+                .await
+                .map_err(|err| {
+                    McpError::internal_error(format!("ingestion failed: {err}"), None)
+                })?;
+                let json = serde_json::to_string(&outcome)
+                    .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
             other => Err(McpError::invalid_params(
-                format!("unsupported kind {other:?}; supported: \"ccda\", \"clinical-pdf\""),
+                format!(
+                    "unsupported kind {other:?}; supported: \"ccda\", \"clinical-pdf\", \"journal\""
+                ),
                 None,
             )),
         }
@@ -803,7 +829,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Drop and rebuild the entire index from the archive and the derived store, replaying every source (CCDA, Fitbit, Oura, narrative PDFs + frozen extraction artifacts) via each blob's sidecar manifest. No re-sync needed. Unknown or malformed blobs are skipped. Returns {blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, narratives_ingested, extractions_applied, blobs_skipped}."
+        description = "Drop and rebuild the entire index from the archive and the derived store, replaying every source (CCDA, Fitbit, Oura, narrative PDFs, journal entries + frozen extraction artifacts) via each blob's sidecar manifest. No re-sync needed. Unknown or malformed blobs are skipped. Returns {blobs_found, ccda_ingested, fitbit_ingested, oura_ingested, narratives_ingested, extractions_applied, journals_ingested, journal_extractions_applied, blobs_skipped}."
     )]
     async fn index_rebuild(
         &self,
@@ -1097,7 +1123,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Full-text search over narrative clinical documents (FTS5, BM25-ranked). Args: query? (FTS5 syntax; omit to list the whole narrative catalog newest-first), limit? (default 20). Query terms containing punctuation (e.g. the ICD-10 code \"R10.9\") must be double-quoted inside the query string, or FTS5 will fail to parse them. Returns {items: [{source_document_id, title, kind, source, document_date, snippet}]}. Pass source_document_id to narrative_get for the full text."
+        description = "Full-text search over narrative clinical documents (FTS5, BM25-ranked). Args: query? (FTS5 syntax; omit to list the whole narrative catalog newest-first), limit? (default 20). Query terms containing punctuation (e.g. the ICD-10 code \"R10.9\") must be double-quoted inside the query string, or FTS5 will fail to parse them. Returns {items: [{source_document_id, title, kind, source, document_date, snippet, codings_count}]}, where codings_count is the document's coded claims (problems + observations); 0 flags an entry that produced no structured data. Pass source_document_id to narrative_get for the full text."
     )]
     async fn narrative_search(
         &self,
@@ -1316,6 +1342,7 @@ mod tests {
                 value_quantity: Some(72.5),
                 value_string: None,
                 value_unit: Some("kg"),
+                derivation: "structured",
             },
         )
         .await
@@ -1752,6 +1779,7 @@ mod tests {
                     value_quantity: Some(stage),
                     value_string: None,
                     value_unit: None,
+                    derivation: "structured",
                 },
             )
             .await
@@ -1805,6 +1833,7 @@ mod tests {
                     value_quantity: Some(minutes),
                     value_string: None,
                     value_unit: Some("min"),
+                    derivation: "structured",
                 },
             )
             .await
@@ -1860,6 +1889,7 @@ mod tests {
                     value_quantity: Some(2.0),
                     value_string: None,
                     value_unit: None,
+                    derivation: "structured",
                 },
             )
             .await
@@ -1878,6 +1908,7 @@ mod tests {
                     value_quantity: Some(minutes),
                     value_string: None,
                     value_unit: Some("min"),
+                    derivation: "structured",
                 },
             )
             .await
@@ -2089,6 +2120,7 @@ mod tests {
                     value_quantity: Some(value),
                     value_string: None,
                     value_unit: None,
+                    derivation: "structured",
                 },
             )
             .await
@@ -2640,7 +2672,10 @@ mod tests {
         // Hermetic: never let this test reach the network. `from_env` reads
         // ANTHROPIC_API_KEY, so clear it for this process before ingesting;
         // env mutation is process-global, so this test runs single-threaded
-        // (flavor = "current_thread") and is the only test touching this var.
+        // (flavor = "current_thread"). `record_ingest_journal_fails_without_key`
+        // below does the same clear; both are idempotent removals so running
+        // concurrently with each other is safe, but neither may run alongside
+        // a test that needs the key present.
         std::env::remove_var("ANTHROPIC_API_KEY");
 
         let server = fresh_server_with_empty_db().await;
@@ -2677,6 +2712,46 @@ mod tests {
         };
         let hits: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
         assert_eq!(hits["items"].as_array().expect("items array").len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_ingest_journal_fails_without_key() {
+        // Same hermeticity concern and pattern as
+        // record_ingest_clinical_pdf_fails_without_key_and_persists_nothing
+        // above: clear the process-global env var and pin this test to a
+        // single-threaded runtime rather than skip when a dev shell happens
+        // to have a key set.
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let server = fresh_server_with_empty_db().await;
+        let err = server
+            .record_ingest(Parameters(RecordIngestArgs {
+                file_path: None,
+                content: Some("# Jul 26, 2026\n\nShoulder aching.".to_owned()),
+                kind: "journal".to_owned(),
+                source: "journal".to_owned(),
+                original_filename: Some("2026-07-26.md".to_owned()),
+            }))
+            .await
+            .expect_err("no extractor configured in tests");
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn record_ingest_rejects_unknown_kind_naming_all_supported() {
+        let server = fresh_server_with_empty_db().await;
+        let err = server
+            .record_ingest(Parameters(RecordIngestArgs {
+                file_path: None,
+                content: Some("x".to_owned()),
+                kind: "fax".to_owned(),
+                source: "test".to_owned(),
+                original_filename: None,
+            }))
+            .await
+            .expect_err("unknown kind");
+        let msg = err.to_string();
+        assert!(msg.contains("ccda") && msg.contains("clinical-pdf") && msg.contains("journal"));
     }
 
     #[tokio::test]

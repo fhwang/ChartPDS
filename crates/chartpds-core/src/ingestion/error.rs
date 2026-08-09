@@ -47,6 +47,25 @@ pub enum Error {
     /// outage) to decide whether re-running the ingest is worthwhile.
     #[error("narrative extraction failed: {0}")]
     Extraction(crate::extraction::Error),
+
+    /// A journal file contains more than one dated markdown header — it is
+    /// a multi-entry file, which v1 does not support.
+    #[error("journal file contains multiple dated headers; split it into one entry per file and re-run the ingest")]
+    MultiEntryJournal,
+
+    /// No verifiable date exists for a journal entry: nothing deterministic
+    /// in the filename or headers, and either the LLM fallback could not
+    /// prove a date against the text or the date it proved does not
+    /// strict-parse as a canonical `YYYY-MM-DD` calendar date (verification
+    /// only range-checks month/day, so e.g. `"2026-02-30"` or a
+    /// non-zero-padded `"2026-7-6"` can pass verification but must still be
+    /// rejected here, before anything persists).
+    #[error("journal entry has no verifiable date: put a YYYY-MM-DD date in the filename, or a dated header with a year (e.g. \"# Jul 26, 2026\"), and re-run the ingest")]
+    UndatedJournal,
+
+    /// Journal ingestion was given bytes that are not UTF-8 text.
+    #[error("journal file is not valid UTF-8 text")]
+    JournalNotUtf8,
 }
 
 impl From<crate::sources::Error> for Error {

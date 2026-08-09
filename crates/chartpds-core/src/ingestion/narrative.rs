@@ -250,6 +250,7 @@ pub(crate) async fn apply_extraction(
                 status: "unknown",
                 onset_date: artifact.document_date.as_deref(),
                 section_label: c.section_label.as_deref(),
+                derivation: "verbatim",
             },
         )
         .await?;
@@ -403,6 +404,10 @@ mod tests {
         assert_eq!(
             problems[0].section_label.as_deref(),
             Some("Pre-Op Diagnosis/Indications")
+        );
+        assert_eq!(
+            problems[0].derivation, "verbatim",
+            "narrative-extracted problems are verbatim-derived"
         );
 
         // Document row has the verified date.
