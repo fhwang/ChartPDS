@@ -52,7 +52,12 @@ reissue = "Oura cloud developer portal — new personal access token"
 name = "CHARTPDS_SYNC_INTERVAL_SECS"
 description = "background sync interval in seconds (default 300; 0 disables the daemon)"
 
-# No deploy steps: the MCP server is compiled on demand by whatever harness
-# launches it (see README "Using it from an agent harness").
+# Build the release MCP server binary (target/release/chartpds-mcp) so
+# orchestration tooling can launch it directly instead of compiling on
+# demand. `mise trust` first: a fresh deployment checkout is an untrusted
+# directory to mise until told otherwise.
 [deploy]
-steps = []
+steps = [
+  "mise trust --quiet",
+  "mise exec -- cargo build --release -p chartpds-mcp",
+]
