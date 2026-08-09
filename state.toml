@@ -1,0 +1,58 @@
+# state.toml — a machine-readable declaration of the runtime state this
+# project owns: the data it writes, the environment variables it reads
+# (secrets declared by name only, each with a pointer to where it would be
+# re-issued), and the steps that make a deployment of it current. It exists
+# for external orchestration, backup, and audit tooling that drives ChartPDS
+# as a black box; ChartPDS itself never reads this file.
+#
+# Conventions: [[state]] entries are the persistence allowlist — paths not
+# listed are presumed disposable. Paths may reference the declared env vars
+# as ${VAR}. Sensitivity tags mark data that must never leave the machine
+# unencrypted (phi = personal health information).
+
+[component]
+name = "ChartPDS"
+repo = "git@github.com:fhwang/ChartPDS.git"
+restore = "README.md"
+
+[[state]]
+path = "${CHARTPDS_DATA_DIR}"
+description = "health data root: content-addressed archive/ is the source of truth; the SQLite index and derived/ are projections rebuildable from it offline"
+sensitivity = ["phi"]
+
+[[env]]
+name = "CHARTPDS_DATA_DIR"
+description = "data root: SQLite index, archive/, derived/ (created if absent)"
+
+[[env]]
+name = "ANTHROPIC_API_KEY"
+secret = true
+reissue = "Anthropic console — new API key; needed only for narrative-PDF ingest"
+
+[[env]]
+name = "ANTHROPIC_BASE_URL"
+description = "optional Anthropic endpoint override (proxies/gateways)"
+
+[[env]]
+name = "GOOGLE_HEALTH_CLIENT_ID"
+secret = true
+reissue = "Google Cloud console — OAuth client for the Google Health API (Fitbit sync)"
+
+[[env]]
+name = "GOOGLE_HEALTH_CLIENT_SECRET"
+secret = true
+reissue = "Google Cloud console — same OAuth client as GOOGLE_HEALTH_CLIENT_ID"
+
+[[env]]
+name = "OURA_PERSONAL_ACCESS_TOKEN"
+secret = true
+reissue = "Oura cloud developer portal — new personal access token"
+
+[[env]]
+name = "CHARTPDS_SYNC_INTERVAL_SECS"
+description = "background sync interval in seconds (default 300; 0 disables the daemon)"
+
+# No deploy steps: the MCP server is compiled on demand by whatever harness
+# launches it (see README "Using it from an agent harness").
+[deploy]
+steps = []
