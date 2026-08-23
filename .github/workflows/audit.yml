@@ -18,7 +18,7 @@ jobs:
     name: cargo deny check advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the toolchain; force the install up front so
       # failures are clearly attributed (same pattern as ci.yml).

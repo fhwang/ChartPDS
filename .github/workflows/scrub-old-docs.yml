@@ -17,7 +17,7 @@ jobs:
   scrub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Scrub stale docs
         run: sh scripts/scrub-old-docs.sh
