@@ -1,0 +1,9 @@
+version: 2
+
+# Version updates for the actions pinned in workflows. Crate security fixes
+# come from Dependabot security updates (a repo setting, no config here).
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

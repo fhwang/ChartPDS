@@ -1,0 +1,34 @@
+name: Audit
+
+# CI runs `just check` (which includes `cargo deny check`) only on push and
+# PR, so an advisory published against a quiet repo surfaces on no event.
+# This scheduled run closes that gap. Note GitHub suspends cron workflows
+# after 60 days without repo activity.
+
+on:
+  schedule:
+    - cron: "23 12 * * 1" # Mondays 12:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo deny check advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the toolchain; force the install up front so
+      # failures are clearly attributed (same pattern as ci.yml).
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check RustSec advisories
+        run: cargo deny check advisories
