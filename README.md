@@ -83,6 +83,7 @@ in the shell:
 | `CHARTPDS_DATA_DIR` | yes | Data root: SQLite index, `archive/`, `derived/` (created if absent) |
 | `ANTHROPIC_API_KEY` | for narrative-PDF ingest | One-time LLM extraction during `record_ingest` of `kind="clinical-pdf"`; no other tool needs it |
 | `ANTHROPIC_BASE_URL` | no | Anthropic endpoint override (proxies/gateways) |
+| `ANTHROPIC_API_KEY_SOURCE` | no | Plain text naming where the launcher read the key (e.g. a file path). Quoted back when the API rejects the key, so the operator knows which value to fix. Holds no secret |
 | `GOOGLE_HEALTH_CLIENT_ID`, `GOOGLE_HEALTH_CLIENT_SECRET` | for Fitbit | OAuth client for the Google Health API |
 | `OURA_PERSONAL_ACCESS_TOKEN` | for Oura | Oura v2 personal access token |
 | `CHARTPDS_SYNC_INTERVAL_SECS` | no | Background sync interval, seconds (default 300; `0` disables the daemon) |
