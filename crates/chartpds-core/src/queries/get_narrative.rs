@@ -1,9 +1,17 @@
 //! Full narrative document read: metadata + extracted text + codings.
+//!
+//! "Codings" spans both tables a narrative can produce. A clinical PDF
+//! quotes its codes, which land in `problems`. A journal entry states no
+//! codes at all — an LLM infers them from prose and they land in
+//! `observations` with `derivation = 'inferred'`. Reading only one table
+//! made a journal entry look uncoded, which is exactly backwards: an
+//! inferred code is the one most in need of a reader.
 
 use sqlx::SqlitePool;
 
 use crate::index::{
-    get_narrative_text, get_source_document_by_id, list_problems_by_source_document,
+    get_narrative_text, get_source_document_by_id, list_observations_by_source_document,
+    list_problems_by_source_document,
 };
 
 /// One coding extracted from this narrative.
@@ -15,8 +23,16 @@ pub struct NarrativeCoding {
     pub coding_code: String,
     /// Display text paired with the code in the document.
     pub coding_display: Option<String>,
-    /// Verbatim section heading the code appeared under.
+    /// Verbatim section heading the code appeared under. Always `None` for
+    /// an inferred coding: colloquial prose has no sections.
     pub section_label: Option<String>,
+    /// How the claim was derived from the document: `"structured"`,
+    /// `"verbatim"`, or `"inferred"` (see the `derivation` migration).
+    pub derivation: String,
+    /// The verbatim span the claim was derived from, filled in by the caller
+    /// from [`crate::provenance::grounding_quotes`]. `None` until then, and
+    /// for a coding whose document never had an extraction artifact.
+    pub grounding_quote: Option<String>,
 }
 
 /// A narrative document with its full text and extracted codings.
@@ -36,7 +52,11 @@ pub struct NarrativeDetail {
     pub original_filename: Option<String>,
     /// Full extracted document text.
     pub text: String,
-    /// Codings extracted (and verified) from this document.
+    /// Content-addressed key of the archived bytes this row indexes — the
+    /// handle the derived store's artifacts name as their subject.
+    pub archive_key: String,
+    /// Codings extracted (and verified) from this document: quoted ones from
+    /// `problems`, inferred ones from `observations`.
     pub codings: Vec<NarrativeCoding>,
 }
 
@@ -58,16 +78,32 @@ pub async fn get_narrative(
     let Some(nt) = get_narrative_text(pool, source_document_id).await? else {
         return Ok(None);
     };
-    let codings = list_problems_by_source_document(pool, source_document_id)
-        .await?
-        .into_iter()
-        .map(|p| NarrativeCoding {
-            coding_system: p.coding_system,
-            coding_code: p.coding_code,
-            coding_display: p.coding_display,
-            section_label: p.section_label,
-        })
-        .collect();
+    let mut codings: Vec<NarrativeCoding> =
+        list_problems_by_source_document(pool, source_document_id)
+            .await?
+            .into_iter()
+            .map(|p| NarrativeCoding {
+                coding_system: p.coding_system,
+                coding_code: p.coding_code,
+                coding_display: p.coding_display,
+                section_label: p.section_label,
+                derivation: p.derivation,
+                grounding_quote: None,
+            })
+            .collect();
+    codings.extend(
+        list_observations_by_source_document(pool, source_document_id)
+            .await?
+            .into_iter()
+            .map(|o| NarrativeCoding {
+                coding_system: o.coding_system,
+                coding_code: o.coding_code,
+                coding_display: o.coding_display,
+                section_label: None,
+                derivation: o.derivation,
+                grounding_quote: None,
+            }),
+    );
     Ok(Some(NarrativeDetail {
         source_document_id,
         kind: doc.kind,
@@ -76,6 +112,7 @@ pub async fn get_narrative(
         document_date: doc.document_date,
         original_filename: doc.original_filename,
         text: nt.text,
+        archive_key: doc.archive_key.to_string(),
         codings,
     }))
 }
@@ -85,9 +122,11 @@ mod tests {
     use super::*;
     use crate::archive::BlobKey;
     use crate::index::{
-        insert_problem, insert_source_document, open_pool, upsert_narrative_text,
-        InsertProblemParams, InsertSourceDocumentParams, UpsertNarrativeTextParams,
+        insert_observation, insert_problem, insert_source_document, open_pool,
+        upsert_narrative_text, InsertObservationParams, InsertProblemParams,
+        InsertSourceDocumentParams, UpsertNarrativeTextParams,
     };
+    use time::macros::datetime;
     use time::OffsetDateTime;
 
     #[tokio::test]
@@ -158,5 +197,70 @@ mod tests {
             .await
             .expect("query")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_a_journal_entrys_inferred_codings() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        std::mem::forget(dir);
+        let pool = open_pool(&url).await.expect("open pool");
+
+        let key = BlobKey::from_hex_str(
+            "6666666666666666666666666666666666666666666666666666666666666666",
+        )
+        .expect("key");
+        let id = insert_source_document(
+            &pool,
+            InsertSourceDocumentParams {
+                archive_key: &key,
+                kind: "journal",
+                source: "manual-upload",
+                original_filename: Some("2026-09-15-journal.md"),
+                archived_at: OffsetDateTime::now_utc(),
+                document_date: Some("2026-09-15"),
+            },
+        )
+        .await
+        .expect("doc");
+        upsert_narrative_text(
+            &pool,
+            UpsertNarrativeTextParams {
+                source_document_id: id,
+                title: Some("Journal"),
+                text: "My left knee hurts a little, and I have a mild limp.",
+            },
+        )
+        .await
+        .expect("text");
+        insert_observation(
+            &pool,
+            InsertObservationParams {
+                source_document_id: id,
+                coding_system: "http://hl7.org/fhir/sid/icd-10-cm",
+                coding_code: "R26.0",
+                coding_display: Some("Ataxic gait"),
+                effective_start: datetime!(2026-09-15 00:00:00 UTC),
+                effective_end: None,
+                value_quantity: None,
+                value_string: None,
+                value_unit: None,
+                derivation: "inferred",
+            },
+        )
+        .await
+        .expect("observation");
+
+        let detail = get_narrative(&pool, id)
+            .await
+            .expect("query")
+            .expect("present");
+        assert_eq!(detail.archive_key, key.to_string());
+        assert_eq!(detail.codings.len(), 1);
+        assert_eq!(detail.codings[0].coding_code, "R26.0");
+        assert_eq!(detail.codings[0].derivation, "inferred");
+        assert_eq!(detail.codings[0].section_label, None);
+        assert_eq!(detail.codings[0].grounding_quote, None);
     }
 }

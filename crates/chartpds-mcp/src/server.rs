@@ -13,8 +13,9 @@
 //! directly in a `#[tokio::test]` and calling the method — no stdio
 //! transport needed.
 
-use chartpds_core::archive::Archive;
+use chartpds_core::archive::{Archive, BlobKey};
 use chartpds_core::ingestion::NarrativeIngestParams;
+use chartpds_core::provenance::grounding_quotes;
 use chartpds_core::sources::oauth::OAuthConfig;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -1152,7 +1153,7 @@ impl ChartPdsServer {
     }
 
     #[tool(
-        description = "Fetch one narrative clinical document: metadata, full extracted text, and the verified codings extracted from it (with their section labels). Args: source_document_id (from narrative_search). Returns null if source_document_id doesn't exist or isn't a narrative (clinical-pdf) document."
+        description = "Fetch one narrative document (kind=\"clinical-pdf\" or kind=\"journal\"): metadata, full extracted text, and every verified coding attached to it. Args: source_document_id (from narrative_search). Returns null if source_document_id doesn't exist or has no indexed text. Each coding carries derivation (\"verbatim\" — the code is quoted in the document; \"inferred\" — an LLM mapped colloquial prose onto a code the text never states), section_label where the document had one, and grounding_quote: the verbatim span the code was read out of, recovered from the frozen extraction artifact. An inferred coding is only as good as that span — read the two together before trusting the code, since nothing mechanical can catch a plausible-looking wrong mapping. grounding_quote is null for a coding whose document was ingested without an extraction artifact."
     )]
     async fn narrative_get(
         &self,
@@ -1161,6 +1162,10 @@ impl ChartPdsServer {
         let detail = chartpds_core::queries::get_narrative(&self.pool, args.source_document_id)
             .await
             .map_err(|err| McpError::internal_error(format!("query failed: {err}"), None))?;
+        let detail = match detail {
+            Some(detail) => Some(self.with_grounding_quotes(detail).await?),
+            None => None,
+        };
         let json = serde_json::to_string(&detail)
             .map_err(|err| McpError::internal_error(format!("serializing: {err}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1170,6 +1175,30 @@ impl ChartPdsServer {
 // ── Private helpers ──────────────────────────────────────────────────
 
 impl ChartPdsServer {
+    /// Fill in each coding's `grounding_quote` from the document's frozen
+    /// extraction artifact.
+    ///
+    /// The index stores codes, not the prose behind them, so this is the only
+    /// place the span survives. A document with no artifact keeps its nulls —
+    /// a coding without a recoverable quote is still a coding worth returning.
+    async fn with_grounding_quotes(
+        &self,
+        mut detail: chartpds_core::queries::NarrativeDetail,
+    ) -> Result<chartpds_core::queries::NarrativeDetail, McpError> {
+        let Ok(key) = BlobKey::from_hex_str(&detail.archive_key) else {
+            return Ok(detail);
+        };
+        let quotes = grounding_quotes(&self.derived, &key)
+            .await
+            .map_err(|err| McpError::internal_error(format!("derived store: {err}"), None))?;
+        for coding in &mut detail.codings {
+            coding.grounding_quote = quotes
+                .get(&coding.coding_system, &coding.coding_code)
+                .map(str::to_owned);
+        }
+        Ok(detail)
+    }
+
     /// Look up the Oura PAT from `source_credentials` (set by
     /// `source_connect`). Falls back to checking the environment for
     /// `OURA_PERSONAL_ACCESS_TOKEN` as a convenience for initial setup.
