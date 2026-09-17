@@ -9,6 +9,8 @@
 //! - [`extraction`] turns narrative PDFs into text + verified codings.
 //! - [`index`] is the `SQLite` projection used for queries.
 //! - [`queries`] exposes analytical reads over the index.
+//! - [`provenance`] recovers, from the derived store, the verbatim span a
+//!   coded claim was derived from.
 //! - [`sync`] orchestrates the loop on a schedule.
 //! - [`notifications`] dispatches out-of-band events on failures.
 //!
@@ -30,6 +32,7 @@ pub mod extraction;
 pub mod index;
 pub mod ingestion;
 pub mod notifications;
+pub mod provenance;
 pub mod queries;
 pub mod sources;
 pub mod sync;
