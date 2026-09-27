@@ -43,6 +43,28 @@ fn messages_url(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
 
+/// Optional provenance for the key, for a rejected-credential message.
+///
+/// A rejected key is a configuration problem, and the raw API text
+/// (`authentication_error: API key is invalid`) does not say which
+/// variable holds the bad value or where that value came from. Whoever
+/// launches the server may set `ANTHROPIC_API_KEY_SOURCE` to a plain
+/// description of where it read the key — a file, a secret manager entry
+/// — and it is quoted back here. The variable holds no secret and is
+/// used for nothing else.
+const KEY_SOURCE_VAR: &str = "ANTHROPIC_API_KEY_SOURCE";
+
+/// The sentence that tells the operator which value to fix.
+fn credential_advice(source: Option<String>) -> String {
+    source.map_or_else(
+        || {
+            "ANTHROPIC_API_KEY was rejected. The server reads it from its own environment."
+                .to_owned()
+        },
+        |source| format!("ANTHROPIC_API_KEY was rejected. The server read it from {source}."),
+    )
+}
+
 const EXTRACTION_PROMPT: &str = "You are extracting structured data from a clinical narrative \
 document for a personal health record. Work ONLY from the document text below; never use \
 outside knowledge to add codes that are not literally present.\n\
@@ -313,12 +335,21 @@ impl ClaudeExtractor {
             let body_text = response.text().await.unwrap_or_default();
             let transient =
                 status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-            return Err((
-                Error::Api {
-                    reason: format!("HTTP {status}: {body_text}"),
-                },
-                transient,
-            ));
+            let rejected_credential = matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            );
+            let reason = if rejected_credential {
+                let advice = credential_advice(
+                    std::env::var(KEY_SOURCE_VAR)
+                        .ok()
+                        .filter(|source| !source.is_empty()),
+                );
+                format!("HTTP {status}: {body_text} — {advice}")
+            } else {
+                format!("HTTP {status}: {body_text}")
+            };
+            return Err((Error::Api { reason }, transient));
         }
         let body: serde_json::Value = response.json().await.map_err(|err| {
             (
@@ -561,11 +592,35 @@ mod tests {
             .await
             .expect_err("auth failure is deterministic; retrying cannot help");
         assert!(err.to_string().contains("401"), "{err}");
+        assert!(
+            err.to_string().contains("ANTHROPIC_API_KEY was rejected"),
+            "a rejected key names the variable to fix: {err}"
+        );
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "client errors must not be retried"
         );
+    }
+
+    #[test]
+    fn credential_advice_quotes_the_launcher_s_description() {
+        let advice = credential_advice(Some("KEY_NAME in /srv/app/.env".to_owned()));
+        assert!(
+            advice.contains("ANTHROPIC_API_KEY was rejected"),
+            "{advice}"
+        );
+        assert!(advice.contains("KEY_NAME in /srv/app/.env"), "{advice}");
+    }
+
+    #[test]
+    fn credential_advice_stands_alone_without_a_description() {
+        let advice = credential_advice(None);
+        assert!(
+            advice.contains("ANTHROPIC_API_KEY was rejected"),
+            "{advice}"
+        );
+        assert!(advice.contains("its own environment"), "{advice}");
     }
 
     #[test]
