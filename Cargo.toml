@@ -48,3 +48,10 @@ anyhow = "1.0"
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
+
+# On macOS 27, a release-built sqlx-macros proc-macro dylib fails to load
+# ("mis-aligned LINKEDIT string pool"), so `cargo build --release` stops in
+# sqlx. Debug info for build-time crates avoids it and leaves the shipped
+# binary unchanged. Remove once a release build works without it.
+[profile.release.build-override]
+debug = true
